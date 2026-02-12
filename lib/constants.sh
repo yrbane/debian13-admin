@@ -30,6 +30,7 @@ readonly LOG_SIZE_FAIL_MB=5000
 readonly CRON_CLAMAV="0 2 * * *"              # quotidien 2h00
 readonly CRON_RKHUNTER="0 3 * * 0"            # hebdo dimanche 3h00
 readonly CRON_AIDE="0 4 * * *"                # quotidien 4h00
+readonly CRON_BLOCK_HACK="0 * * * *"            # toutes les heures
 readonly CRON_UPDATES="0 7 * * 1"             # hebdo lundi 7h00
 readonly CRON_AUDIT="0 7 * * 1"               # hebdo lundi 7h00
 

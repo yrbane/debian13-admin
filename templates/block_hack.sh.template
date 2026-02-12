@@ -1,0 +1,59 @@
+#!/bin/bash
+# block_hack.sh — Bloque les IPs suspectes depuis les logs ModSecurity
+# Exécuté toutes les heures via cron
+# Généré automatiquement par debian13-server.sh
+
+MODSEC_LOG="/var/log/apache2/modsec_audit.log"
+TRUSTED_IPS="__TRUSTED_IPS__"
+LOG_TAG="block_hack"
+
+# Garde-fou : sortie propre si le log modsec n'existe pas
+if [[ ! -f "$MODSEC_LOG" ]]; then
+  logger -t "$LOG_TAG" "Log ModSecurity absent (${MODSEC_LOG}), rien à faire."
+  exit 0
+fi
+
+# Construire le pattern grep d'exclusion depuis les IPs de confiance
+EXCLUDE_PATTERN=""
+for ip in $TRUSTED_IPS; do
+  ip_escaped=$(echo "$ip" | sed 's/\./\\./g')
+  if [[ -z "$EXCLUDE_PATTERN" ]]; then
+    EXCLUDE_PATTERN="^(${ip_escaped}"
+  else
+    EXCLUDE_PATTERN="${EXCLUDE_PATTERN}|${ip_escaped}"
+  fi
+done
+if [[ -n "$EXCLUDE_PATTERN" ]]; then
+  EXCLUDE_PATTERN="${EXCLUDE_PATTERN})$"
+fi
+
+# Extraire les IPs suspectes depuis le log ModSecurity
+MALICIOUS_IPS=$(awk '
+  $0 ~ /^--.*-A--$/ {
+    getline
+    if (match($0, /([0-9]{1,3}\.){3}[0-9]{1,3}/, m)) print m[0]
+  }
+' "$MODSEC_LOG" \
+| sort | uniq -c | sort -nr \
+| awk '{print $2}' \
+| sort -u)
+
+# Filtrer les IPs de confiance si le pattern existe
+if [[ -n "$EXCLUDE_PATTERN" ]]; then
+  MALICIOUS_IPS=$(echo "$MALICIOUS_IPS" | grep -v -E "$EXCLUDE_PATTERN" || true)
+fi
+
+# Bloquer chaque IP via UFW
+if [[ -z "$MALICIOUS_IPS" ]]; then
+  exit 0
+fi
+
+echo "$MALICIOUS_IPS" | while read -r ip; do
+  [[ -z "$ip" ]] && continue
+  # Ne pas re-bloquer une IP déjà bloquée
+  if ufw status | grep -q "$ip"; then
+    continue
+  fi
+  ufw deny from "$ip" >/dev/null 2>&1
+  logger -t "$LOG_TAG" "IP bloquée : ${ip}"
+done

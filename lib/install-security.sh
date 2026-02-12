@@ -15,7 +15,7 @@ if $INSTALL_CLAMAV; then
   mkdir -p "${SCRIPTS_DIR}"
   deploy_script "${SCRIPTS_DIR}/clamav_scan.sh" \
     "$(cat "${SCRIPT_DIR}/templates/clamav_scan.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/clamav_scan.sh.template")" \
-    "${CRON_CLAMAV} ${SCRIPTS_DIR}/clamav_scan.sh >/dev/null 2>&1" \
+    "${CRON_CLAMAV}" \
     "ClamAV scan quotidien" \
     "__CLAMAV_RETENTION__" "${CLAMAV_LOG_RETENTION_DAYS}"
 
@@ -57,7 +57,7 @@ RKHCONF
   mkdir -p "${SCRIPTS_DIR}"
   deploy_script "${SCRIPTS_DIR}/rkhunter_scan.sh" \
     "$(cat "${SCRIPT_DIR}/templates/rkhunter_scan.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/rkhunter_scan.sh.template")" \
-    "${CRON_RKHUNTER} ${SCRIPTS_DIR}/rkhunter_scan.sh >/dev/null 2>&1" \
+    "${CRON_RKHUNTER}" \
     "rkhunter scan hebdomadaire (dimanche 3h00)" \
     "__RKHUNTER_RETENTION__" "${RKHUNTER_LOG_RETENTION_DAYS}"
 
@@ -171,7 +171,7 @@ AIDECONF
   mkdir -p "${SCRIPTS_DIR}"
   deploy_script "${SCRIPTS_DIR}/aide_check.sh" \
     "$(cat "${SCRIPT_DIR}/templates/aide_check.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/aide_check.sh.template")" \
-    "${CRON_AIDE} ${SCRIPTS_DIR}/aide_check.sh >/dev/null 2>&1" \
+    "${CRON_AIDE}" \
     "AIDE vérification quotidienne (4h00)" \
     "__AIDE_RETENTION__" "${AIDE_LOG_RETENTION_DAYS}"
 
@@ -222,8 +222,17 @@ MODSECCONF
 
   systemctl restart apache2
 
+  # Déployer block_hack.sh (blocage IPs suspectes depuis les logs ModSec)
+  mkdir -p "${SCRIPTS_DIR}"
+  deploy_script "${SCRIPTS_DIR}/block_hack.sh" \
+    "$(cat "${SCRIPT_DIR}/templates/block_hack.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/block_hack.sh.template")" \
+    "${CRON_BLOCK_HACK}" \
+    "Bloquer tentatives de hack (toutes les heures)" \
+    "__TRUSTED_IPS__" "${TRUSTED_IPS:-}"
+
   log "ModSecurity OWASP CRS installé (mode DetectionOnly)"
   log "Pour activer le blocage : sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' ${MODSEC_CONFIG} && systemctl restart apache2"
+  log "block_hack.sh déployé (blocage IPs suspectes toutes les heures)"
 fi
 
 # ---------------------------------- 14g) Secure /tmp ----------------------------------
@@ -292,7 +301,7 @@ dpkg-reconfigure -f noninteractive unattended-upgrades
 mkdir -p "${SCRIPTS_DIR}"
 deploy_script "${SCRIPTS_DIR}/check-updates.sh" \
   "$(cat "${SCRIPT_DIR}/templates/check-updates.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/check-updates.sh.template")" \
-  "${CRON_UPDATES} ${SCRIPTS_DIR}/check-updates.sh >/dev/null 2>&1" \
+  "${CRON_UPDATES}" \
   "Vérification mises à jour hebdomadaire (lundi 7h00)"
 
 log "Script check-updates.sh créé : ${SCRIPTS_DIR}/check-updates.sh"

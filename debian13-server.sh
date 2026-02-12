@@ -506,6 +506,9 @@ for old_conf in "/root/.bootstrap.conf" "${SCRIPT_DIR}/.bootstrap.conf"; do
   fi
 done
 
+# MAILTO en tête du crontab
+set_cron_mailto "${EMAIL_FOR_CERTBOT}"
+
 # Ajoute/met à jour le cron pour l'audit hebdomadaire
 add_cron_job "\-\-audit" "${CRON_AUDIT} ${INSTALL_SCRIPT_PATH} --audit >/dev/null 2>&1" "Audit de sécurité hebdomadaire (lundi 7h00)"
 log "Cron audit configuré → ${INSTALL_SCRIPT_PATH} --audit"

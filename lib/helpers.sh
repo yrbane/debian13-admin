@@ -129,6 +129,16 @@ add_cron_job() {
   fi
 }
 
+set_cron_mailto() {
+  local email="$1"
+  local current
+  current=$(crontab -l 2>/dev/null || true)
+  # Supprimer tout ancien MAILTO
+  local clean
+  clean=$(echo "$current" | grep -v '^MAILTO=' || true)
+  echo -e "MAILTO=${email}\n${clean}" | grep -v '^$' | crontab -
+}
+
 deploy_script() {
   local path="$1" content="$2" cron_schedule="${3:-}" cron_comment="${4:-}"
   shift 4 2>/dev/null || true
