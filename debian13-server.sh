@@ -67,79 +67,78 @@ source "${LIB_DIR}/config.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
-  cat <<EOF
-Bootstrap & Hardening Debian 13 (OVH)
+  printf "\n"
+  printf "${BOLD}${CYAN}  Bootstrap & Hardening Debian 13 (OVH)${RESET}\n"
+  printf "\n"
 
-USAGE:
-  sudo ./bootstrap.sh [--noninteractive] [--help]
+  printf "${BOLD}${MAGENTA}USAGE:${RESET}\n"
+  printf "  sudo ./${SCRIPT_NAME}.sh [OPTIONS]\n"
+  printf "\n"
 
-OPTIONS:
-  --noninteractive    N'affiche pas les questions ; utilise les valeurs par défaut et installe ce qui est activé par défaut.
-  --help              Affiche cette aide, la liste des composants et toutes les notes de sécurité/DNS.
+  printf "${BOLD}${MAGENTA}OPTIONS:${RESET}\n"
+  printf "  ${GREEN}--noninteractive${RESET}    N'affiche pas les questions ; utilise les valeurs par défaut.\n"
+  printf "  ${GREEN}--audit${RESET}             Vérifications + rapport email, sans installation.\n"
+  printf "  ${GREEN}--check-dns${RESET}         Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
+  printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}          Affiche cette aide.\n"
+  printf "\n"
 
-PARAMÈTRES (posés au démarrage en mode interactif, sinon valeurs par défaut) :
-  - HOSTNAME_FQDN (défaut: ${HOSTNAME_FQDN_DEFAULT})
-  - SSH_PORT (défaut: ${SSH_PORT_DEFAULT})
-  - ADMIN_USER (défaut: ${ADMIN_USER_DEFAULT})
-  - DKIM_SELECTOR (défaut: ${DKIM_SELECTOR_DEFAULT})
-  - DKIM_DOMAIN (défaut: ${DKIM_DOMAIN_DEFAULT})
-  - EMAIL_FOR_CERTBOT (défaut: ${EMAIL_FOR_CERTBOT_DEFAULT})
-  - TIMEZONE (défaut: ${TIMEZONE_DEFAULT})
+  printf "${BOLD}${MAGENTA}PARAMÈTRES${RESET} (mode interactif, sinon valeurs par défaut) :\n"
+  printf "  - HOSTNAME_FQDN    ${YELLOW}(défaut: %s)${RESET}\n" "${HOSTNAME_FQDN_DEFAULT}"
+  printf "  - SSH_PORT         ${YELLOW}(défaut: %s)${RESET}\n" "${SSH_PORT_DEFAULT}"
+  printf "  - ADMIN_USER       ${YELLOW}(défaut: %s)${RESET}\n" "${ADMIN_USER_DEFAULT}"
+  printf "  - DKIM_SELECTOR    ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_SELECTOR_DEFAULT}"
+  printf "  - DKIM_DOMAIN      ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_DOMAIN_DEFAULT}"
+  printf "  - EMAIL_FOR_CERTBOT ${YELLOW}(défaut: %s)${RESET}\n" "${EMAIL_FOR_CERTBOT_DEFAULT}"
+  printf "  - TIMEZONE         ${YELLOW}(défaut: %s)${RESET}\n" "${TIMEZONE_DEFAULT}"
+  printf "\n"
 
-COMPOSANTS INSTALLABLES (question par question) :
-  - Locales fr_FR complètes
-  - Durcissement SSH + port personnalisé
-  - UFW (deny in, allow out) + Fail2ban
-  - Apache + PHP + durcissements
-  - MariaDB (hardening basique)
-  - phpMyAdmin (URL sécurisée aléatoire)
-  - Postfix send-only + OpenDKIM (signature DKIM sortante)
-  - Certbot (Let's Encrypt) + intégration Apache
-  - Outils dev (Git, Curl, build-essential)
-  - Node.js via nvm (LTS)
-  - Rust via rustup (stable)
-  - Composer (global)
-  - Confort shell (neofetch, fortune-mod, cowsay, lolcat, grc, zip/unzip, p7zip, unrar, beep, youtube-dl optionnel)
-  - ClamAV (freshclam + daemon)
-  - .bashrc commun pour tous les utilisateurs (avec bannière et aliases)
+  printf "${BOLD}${MAGENTA}COMPOSANTS INSTALLABLES${RESET} (question par question) :\n"
+  printf "  - Locales fr_FR complètes\n"
+  printf "  - Durcissement SSH + port personnalisé\n"
+  printf "  - UFW (deny in, allow out) + Fail2ban\n"
+  printf "  - Apache + PHP + durcissements\n"
+  printf "  - MariaDB (hardening basique)\n"
+  printf "  - phpMyAdmin (URL sécurisée aléatoire)\n"
+  printf "  - Postfix send-only + OpenDKIM (signature DKIM sortante)\n"
+  printf "  - Certbot (Let's Encrypt) + intégration Apache\n"
+  printf "  - Outils dev (Git, Curl, build-essential)\n"
+  printf "  - Node.js via nvm (LTS)\n"
+  printf "  - Rust via rustup (stable)\n"
+  printf "  - Composer (global)\n"
+  printf "  - Confort shell (neofetch, fortune-mod, cowsay, lolcat, grc, p7zip, unrar)\n"
+  printf "  - ClamAV (freshclam + daemon)\n"
+  printf "  - .bashrc commun pour tous les utilisateurs\n"
+  printf "\n"
 
-NOTES DNS & SÉCURITÉ :
-  - Vos MX pointent chez OVH : le serveur n'écoute pas SMTP entrant (relay local désactivé).
-  - SPF : votre entrée contient "a" → l'IP du A (142.44.139.193) est autorisée à émettre.
-  - DKIM (sélecteur "mail") : vérifiez la correspondance clé publique/privée avec:
-      opendkim-testkey -d <domaine> -s <selector> -x /etc/opendkim.conf
-  - DMARC présent (p=quarantine) : conforme.
-  - Wildcard A suspect: "* IN A 42.44.139.193" → corrigez en "142.44.139.193".
+  printf "${BOLD}${MAGENTA}NOTES DNS & SÉCURITÉ :${RESET}\n"
+  printf "  - MX chez OVH : le serveur n'écoute pas SMTP entrant (relay local désactivé).\n"
+  printf "  - DKIM (sélecteur ${YELLOW}\"mail\"${RESET}) : vérifier la correspondance clé publique/privée.\n"
+  printf "  - SPF/DMARC : configurés correctement = emails non-spam.\n"
+  printf "\n"
 
-FICHIER DE CONFIGURATION :
-  Après avoir répondu aux questions, un fichier .bootstrap.conf est créé à côté du script.
-  Lors des exécutions suivantes, le script propose de réutiliser cette configuration.
-  Pour forcer une nouvelle configuration, supprimez le fichier ou répondez 'n' à la question.
+  printf "${BOLD}${MAGENTA}FICHIER DE CONFIGURATION :${RESET}\n"
+  printf "  Après les questions, un fichier ${YELLOW}.conf${RESET} est créé à côté du script.\n"
+  printf "  Les exécutions suivantes proposent de réutiliser cette configuration.\n"
+  printf "\n"
 
-EXEMPLES :
-  # Exécution standard (crée .bootstrap.conf après les questions)
-  sudo ./bootstrap.sh
-
-  # Relance rapide (réutilise .bootstrap.conf si présent)
-  sudo ./bootstrap.sh
-
-  # Non interactif (valeurs par défaut, ignore .bootstrap.conf)
-  sudo ./bootstrap.sh --noninteractive
-
-  # Audit uniquement (vérifications + rapport email, sans installation)
-  sudo ./bootstrap.sh --audit
-
-EOF
+  printf "${BOLD}${MAGENTA}EXEMPLES :${RESET}\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh${RESET}                  # Exécution standard\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --noninteractive${RESET}  # Valeurs par défaut\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --audit${RESET}           # Audit uniquement\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns${RESET}       # Vérification DNS/DKIM\n"
+  printf "\n"
 }
 
 # ---------------------------------- Arguments -----------------------------------------
 NONINTERACTIVE=false
 AUDIT_MODE=false
+CHECK_DNS_MODE=false
 PIPED_MODE=false
 for arg in "$@"; do
   case "$arg" in
     --noninteractive) NONINTERACTIVE=true ;;
     --audit) AUDIT_MODE=true ;;
+    --check-dns) CHECK_DNS_MODE=true ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $arg"; show_help; exit 1 ;;
   esac
@@ -174,17 +173,17 @@ if ! grep -qi 'debian' /etc/os-release; then
   warn "Distribution non détectée comme Debian. Le script cible Debian 13 (trixie)."
 fi
 
-if [[ "${AUDIT_MODE:-false}" != "true" ]]; then
+if [[ "${AUDIT_MODE:-false}" != "true" && "${CHECK_DNS_MODE:-false}" != "true" ]]; then
   preflight_checks
 fi
 
 # ---------------------------------- Configuration -------------------------------------
-if $AUDIT_MODE; then
+if $AUDIT_MODE || $CHECK_DNS_MODE; then
   if [[ -f "$CONFIG_FILE" ]]; then
     load_config
     apply_config_defaults
   else
-    die "Mode audit : fichier de configuration ${CONFIG_FILE} requis. Exécutez d'abord le script normalement."
+    die "Mode audit/check-dns : fichier de configuration ${CONFIG_FILE} requis. Exécutez d'abord le script normalement."
   fi
 elif ! $NONINTERACTIVE; then
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -229,6 +228,111 @@ export DEBIAN_FRONTEND
 # ================================== VÉRIFICATIONS (définitions) =======================
 # shellcheck source=lib/verify.sh
 source "${LIB_DIR}/verify.sh"
+
+# ---------------------------------- Fonction checklist DNS ----------------------------
+print_dns_actions() {
+  print_title "Actions DNS requises chez le registrar"
+  if [[ -n "${SERVER_IP:-}" ]]; then
+    print_note "IP publique de ce serveur : ${SERVER_IP}"
+  fi
+  echo ""
+
+  # A record
+  if [[ -n "${DNS_A:-}" && "${DNS_A:-}" == "${SERVER_IP:-}" ]]; then
+    log "A ${HOSTNAME_FQDN} → ${DNS_A}"
+  else
+    warn "A : ajouter/corriger chez le registrar :"
+    print_cmd "${HOSTNAME_FQDN}.   IN A   ${SERVER_IP}"
+  fi
+
+  # www
+  if [[ -n "${DNS_WWW:-}" ]] && [[ "${DNS_WWW:-}" == "${SERVER_IP:-}" || "${DNS_WWW:-}" == "${DNS_A:-}" ]]; then
+    log "A www.${HOSTNAME_FQDN} → ${DNS_WWW}"
+  else
+    warn "www : ajouter chez le registrar :"
+    print_cmd "www.${HOSTNAME_FQDN}.   IN A   ${SERVER_IP}"
+  fi
+
+  # MX
+  if [[ -n "${DNS_MX:-}" ]]; then
+    log "MX ${BASE_DOMAIN} → ${DNS_MX}"
+  else
+    warn "MX : non configuré (requis pour recevoir des emails) :"
+    print_cmd "${BASE_DOMAIN}.   IN MX 10   ${HOSTNAME_FQDN}."
+  fi
+
+  # SPF
+  if [[ -n "${DNS_SPF:-}" ]]; then
+    log "SPF ${BASE_DOMAIN} → configuré"
+  else
+    warn "SPF : ajouter un enregistrement TXT :"
+    print_cmd "${BASE_DOMAIN}.   IN TXT   \"v=spf1 a mx ip4:${SERVER_IP} ~all\""
+  fi
+
+  # DKIM
+  if [[ -n "${DNS_DKIM:-}" ]] && [[ "${DNS_DKIM:-}" == *"v=DKIM1"* ]]; then
+    log "DKIM ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} → configuré"
+  else
+    warn "DKIM : ajouter l'enregistrement TXT suivant :"
+    if [[ -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" ]]; then
+      print_note "Contenu de ${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt :"
+      print_cmd "$(cat "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null || echo '(fichier introuvable)')"
+    else
+      print_cmd "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}.   IN TXT   \"v=DKIM1; k=rsa; p=...\""
+      print_note "Générer la clé : opendkim-genkey -s ${DKIM_SELECTOR} -d ${DKIM_DOMAIN}"
+    fi
+  fi
+
+  # DMARC
+  if [[ -n "${DNS_DMARC:-}" ]] && [[ "${DNS_DMARC:-}" != *"p=none"* ]]; then
+    log "DMARC _dmarc.${BASE_DOMAIN} → configuré"
+  else
+    if [[ "${DNS_DMARC:-}" == *"p=none"* ]]; then
+      warn "DMARC : policy=none trop permissif, passer à quarantine :"
+    else
+      warn "DMARC : ajouter un enregistrement TXT :"
+    fi
+    print_cmd "_dmarc.${BASE_DOMAIN}.   IN TXT   \"v=DMARC1; p=quarantine; rua=mailto:${EMAIL_FOR_CERTBOT}; fo=1\""
+  fi
+
+  # PTR (reverse DNS)
+  if [[ -n "${DNS_PTR:-}" ]] && [[ "${DNS_PTR:-}" == "$HOSTNAME_FQDN" || "${DNS_PTR:-}" == *"${BASE_DOMAIN}"* ]]; then
+    log "PTR ${SERVER_IP} → ${DNS_PTR}"
+  else
+    warn "PTR (reverse DNS) : non configuré ou incorrect pour ${SERVER_IP}"
+    if [[ -n "${DNS_PTR:-}" ]]; then
+      print_note "Actuel : ${DNS_PTR} (attendu : ${HOSTNAME_FQDN})"
+    fi
+    print_note "Configurer dans le panneau OVH :"
+    print_note "  Manager OVH → IP → Roue crantée → Modifier le reverse → ${HOSTNAME_FQDN}"
+  fi
+
+  echo ""
+  print_note "Postfix : envoi local uniquement (loopback-only)"
+  echo ""
+  print_note "Vérification rapide (après propagation DNS) :"
+  print_cmd "dig +short A ${HOSTNAME_FQDN} @8.8.8.8"
+  print_cmd "dig +short MX ${BASE_DOMAIN} @8.8.8.8"
+  print_cmd "dig +short TXT ${BASE_DOMAIN} @8.8.8.8"
+  print_cmd "dig +short TXT ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} @8.8.8.8"
+  print_cmd "dig +short TXT _dmarc.${BASE_DOMAIN} @8.8.8.8"
+  print_cmd "dig +short -x ${SERVER_IP}"
+  echo ""
+}
+
+# ================================== MODE --check-dns ==================================
+if $CHECK_DNS_MODE; then
+  CHECK_MODE="cli"
+  verify_dkim
+  verify_dns
+  echo ""
+  printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+  printf "${BOLD}  Résultat : ${GREEN}%d OK${RESET} | ${YELLOW}%d avertissements${RESET} | ${RED}%d erreurs${RESET}\n" "$CHECKS_OK" "$CHECKS_WARN" "$CHECKS_FAIL"
+  printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+  echo ""
+  print_dns_actions
+  exit 0
+fi
 
 # ================================== INSTALLATION ======================================
 if ! $AUDIT_MODE; then
@@ -440,26 +544,7 @@ print_title "Sécurité noyau & journaux"
 print_note "sysctl durci ; journald en stockage persistant"
 echo ""
 
-print_title "Remarques DNS (actions requises)"
-if [[ -z "${DNS_MX:-}" ]]; then
-  print_note "⚠ MX : non configuré - configurer chez le registrar si emails entrants requis"
-else
-  print_note "MX : ${DNS_MX}"
-fi
-if [[ -z "${DNS_SPF:-}" ]]; then
-  print_note "⚠ SPF : non configuré - ajouter TXT \"v=spf1 a mx ~all\" pour éviter le spam"
-else
-  print_note "SPF : configuré"
-fi
-if [[ -z "${DNS_DMARC:-}" ]]; then
-  print_note "⚠ DMARC : non configuré - ajouter TXT _dmarc avec p=quarantine"
-elif [[ "${DNS_DMARC:-}" == *"p=none"* ]]; then
-  print_note "⚠ DMARC : policy=none (trop permissif, passer à quarantine ou reject)"
-else
-  print_note "DMARC : configuré"
-fi
-print_note "Postfix : envoi local uniquement (loopback-only)"
-echo ""
+print_dns_actions
 
 printf "${CYAN}Fichier log :${RESET} %s\n\n" "${LOG_FILE}"
 

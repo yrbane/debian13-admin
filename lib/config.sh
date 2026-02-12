@@ -91,11 +91,14 @@ load_config() {
       grep -vE '^\s*#|^\s*$|^[A-Z_][A-Z_0-9]*=(true|false|[0-9]+|"[^"$`]*"|[^"$`[:space:]]*)$' "$CONFIG_FILE" | head -5
       die "Corrigez le fichier de config ou supprimez-le pour le recréer."
     fi
+    # Extraire la version du fichier avant sourcing (CONFIG_VERSION est readonly)
+    local file_version
+    file_version="$(grep -m1 '^CONFIG_VERSION=' "$CONFIG_FILE" | cut -d= -f2)" || true
+    file_version="${file_version:-1}"
     set +u
     # shellcheck disable=SC1090
-    source "$CONFIG_FILE"
+    source <(grep -v '^CONFIG_VERSION=' "$CONFIG_FILE")
     set -u
-    local file_version="${CONFIG_VERSION:-1}"
     if (( file_version < CONFIG_VERSION )); then
       warn "Fichier de config version ${file_version}, version courante ${CONFIG_VERSION}. Migration automatique."
     fi

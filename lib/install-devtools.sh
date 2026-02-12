@@ -16,6 +16,7 @@ if $INSTALL_NODE; then
   # Installation de nvm pour l'utilisateur admin (download then execute)
   NVM_INSTALLER="$(mktempfile .sh)"
   curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" -o "$NVM_INSTALLER"
+  chmod a+r "$NVM_INSTALLER"
   run_as_user "
     export NVM_DIR=\"${USER_HOME}/.nvm\"
     mkdir -p \"\$NVM_DIR\"
@@ -48,6 +49,7 @@ if $INSTALL_RUST; then
   if ! sudo -u "$ADMIN_USER" -H bash -c "command -v rustup" >/dev/null 2>&1; then
     RUSTUP_INSTALLER="$(mktempfile .sh)"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUSTUP_INSTALLER"
+    chmod a+r "$RUSTUP_INSTALLER"
     run_as_user "
       bash \"$RUSTUP_INSTALLER\" -y --default-toolchain stable
     "
@@ -99,6 +101,7 @@ if $INSTALL_COMPOSER; then
   # Télécharge et installe Composer pour l'utilisateur (download then execute)
   COMPOSER_INSTALLER="$(mktempfile .php)"
   curl -fsSL https://getcomposer.org/installer -o "$COMPOSER_INSTALLER"
+  chmod a+r "$COMPOSER_INSTALLER"
   # Vérification du hash (obligatoire — sécurité supply chain)
   EXPECTED_SIG="$(curl -fsSL https://composer.github.io/installer.sig 2>/dev/null || true)"
   if [[ -z "$EXPECTED_SIG" ]]; then

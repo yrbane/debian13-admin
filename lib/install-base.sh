@@ -93,6 +93,7 @@ if $GEOIP_BLOCK && $INSTALL_UFW; then
   # Script de mise à jour des IPs bloquées
   cat > /usr/local/bin/geoip-update.sh << 'GEOIPSCRIPT'
 #!/bin/bash
+CURL_TIMEOUT=10
 # Mise à jour des IPs bloquées par pays (Asie + Afrique)
 # Pour débloquer un pays: retirer son code de COUNTRIES et relancer le script
 # Codes pays: https://www.ipdeny.com/ipblocks/data/countries/
@@ -145,7 +146,7 @@ CRONEOF
 
   # Recharger UFW
   ufw reload
-  log "Blocage GeoIP activé. $(ipset list geoip_blocked | grep -c '^[0-9]') plages bloquées."
+  log "Blocage GeoIP activé. $(ipset list geoip_blocked | grep -c '^[0-9]' || true) plages bloquées."
 fi
 
 # ---------------------------------- 4) Fail2ban ---------------------------------------
