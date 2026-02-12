@@ -100,6 +100,18 @@ readonly GEOIP_COUNTRIES_AFRICA="dz ao bj bw bf bi cv cm cf td km cg cd ci dj eg
 readonly GEOIP_COUNTRIES_ASIA="af am az bh bd bt bn kh cn ge in id ir iq il jo kz kw kg la lb my mv mn mm np kp om pk ps ph qa ru sa sg kr lk sy tw tj th tl tr tm ae uz vn ye"
 readonly GEOIP_COUNTRY_COUNT=103
 
+# SSH hardening — algorithmes
+readonly SSH_CIPHERS="chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr"
+readonly SSH_MACS="hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com"
+readonly SSH_KEX="sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org"
+
+# PHP — fonctions dangereuses à désactiver
+readonly PHP_DISABLED_FUNCTIONS="exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source"
+
+# Patterns de détection (sécurité web)
+readonly SUSPICIOUS_URL_PATTERNS='(wp-login|wp-admin|wp-content|wp-includes|xmlrpc\.php|\.env|\.git|phpinfo|phpmyadmin|pma|adminer|\.sql|\.bak|\.zip|\.tar|\.rar|shell|eval\(|base64|union.*select|concat\(|etc/passwd|\.\.\/|%2e%2e|<script|\.asp|\.aspx|cgi-bin|\.cgi)'
+readonly BAD_BOT_AGENTS='(nikto|sqlmap|nmap|masscan|zgrab|census|shodan|curl/|wget/|python-requests|go-http|libwww|scanner|exploit|vulnerability|attack)'
+
 # Couleurs HTML (charte Since & Co)
 readonly HTML_COLOR_DARK="#142136"
 readonly HTML_COLOR_ACCENT="#dc5c3b"
@@ -478,10 +490,20 @@ ask_all_questions() {
     warn "Le hostname '${HOSTNAME_FQDN}' ne semble pas être un FQDN valide (ex: server.example.com)"
   fi
   SSH_PORT="$(prompt_default 'Port SSH' "$SSH_PORT_DEFAULT")"
+  if ! [[ "$SSH_PORT" =~ ^[0-9]+$ ]] || (( SSH_PORT < 1 || SSH_PORT > 65535 )); then
+    warn "Port SSH invalide '${SSH_PORT}' (doit être 1-65535), utilisation de ${SSH_PORT_DEFAULT}"
+    SSH_PORT="$SSH_PORT_DEFAULT"
+  fi
   ADMIN_USER="$(prompt_default 'Utilisateur admin (clé SSH déjà en place)' "$ADMIN_USER_DEFAULT")"
   DKIM_SELECTOR="$(prompt_default 'DKIM selector' "$DKIM_SELECTOR_DEFAULT")"
   DKIM_DOMAIN="$(prompt_default 'Domaine DKIM' "$DKIM_DOMAIN_DEFAULT")"
+  if [[ ! "$DKIM_DOMAIN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$ ]]; then
+    warn "Domaine DKIM '${DKIM_DOMAIN}' semble invalide"
+  fi
   EMAIL_FOR_CERTBOT="$(prompt_default "Email Let's Encrypt" "$EMAIL_FOR_CERTBOT_DEFAULT")"
+  if [[ ! "$EMAIL_FOR_CERTBOT" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
+    warn "Email '${EMAIL_FOR_CERTBOT}' ne semble pas valide"
+  fi
   TIMEZONE="$(prompt_default 'Fuseau horaire' "$TIMEZONE_DEFAULT")"
 
   section "Choix des composants"
@@ -553,6 +575,14 @@ ask_all_questions() {
   echo "Exemples: votre IP maison, IP bureau. Séparées par des espaces."
   echo "Laisser vide pour ignorer."
   TRUSTED_IPS="$(prompt_default "IPs de confiance" "${TRUSTED_IPS:-}")"
+  # Validation basique des IPs
+  if [[ -n "$TRUSTED_IPS" ]]; then
+    for ip in $TRUSTED_IPS; do
+      if [[ ! "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}(/[0-9]{1,2})?$ ]]; then
+        warn "IP/CIDR '${ip}' ne semble pas valide (format attendu: x.x.x.x ou x.x.x.x/yy)"
+      fi
+    done
+  fi
 
   save_config
 }
@@ -680,7 +710,8 @@ trap 'cleanup_tmpfiles; err "Erreur à la ligne $LINENO. Consulte le journal si 
 backup_file() {
   local f="$1"
   if [[ -f "$f" ]]; then
-    local bak="${f}.$(date +%Y%m%d%H%M%S).bak"
+    local bak
+    bak="${f}.$(date +%Y%m%d%H%M%S).bak"
     if ! cp -a "$f" "$bak"; then
       warn "Impossible de sauvegarder ${f} → ${bak}"
       return 1
@@ -756,12 +787,19 @@ add_cron_job() {
 # Usage: deploy_script <path> <content> [cron_schedule] [cron_comment]
 deploy_script() {
   local path="$1" content="$2" cron_schedule="${3:-}" cron_comment="${4:-}"
+  shift 4 2>/dev/null || true
+  # Paires supplémentaires : __PLACEHOLDER__ value __PLACEHOLDER2__ value2 ...
   local dir
   dir="$(dirname "$path")"
   mkdir -p "$dir"
 
   echo "$content" > "$path"
   sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" "$path"
+  # Substitutions supplémentaires passées en paires
+  while [[ $# -ge 2 ]]; do
+    sed -i "s|${1}|${2}|g" "$path"
+    shift 2
+  done
   chmod +x "$path"
 
   if [[ -n "$cron_schedule" ]]; then
@@ -837,6 +875,76 @@ check_db_freshness() {
   fi
 }
 
+# (#6 — Phase 3) Configure une directive PHP INI
+# Usage: php_ini_set <key> <value> <ini_file>
+php_ini_set() {
+  local key="$1" value="$2" ini="$3"
+  sed -ri "s/^;?\s*${key}\s*=.*/${key} = ${value}/" "$ini"
+}
+
+# (#7 — Phase 3) Vérifie les permissions d'un fichier/répertoire
+# Usage: check_file_perms <path> <label> <expected_modes_regex> [mode: cli|html]
+check_file_perms() {
+  local path="$1" label="$2" expected="$3" mode="${4:-cli}"
+  local perms
+  perms=$(stat -c %a "$path" 2>/dev/null) || return 1
+  if [[ "$perms" =~ ^(${expected})$ ]]; then
+    if [[ "$mode" == "html" ]]; then
+      add_html_check ok "${label} : permissions correctes (${perms})"
+    else
+      check_ok "${label} : permissions correctes (${perms})"
+    fi
+  else
+    if [[ "$mode" == "html" ]]; then
+      add_html_check warn "${label} : permissions = ${perms} (attendu : ${expected})"
+    else
+      check_warn "${label} : permissions = ${perms} (attendu : ${expected})"
+    fi
+  fi
+}
+
+# (#8 — Phase 3) Compte les occurrences d'un pattern dans un fichier/commande (safe, retourne 0 si absent)
+# (#2 — Phase 3 P0) Vérifie si un pattern existe dans un fichier config
+# Usage: check_config_grep <file> <regex> <ok_msg> <fail_msg> [mode: cli|html]
+check_config_grep() {
+  local file="$1" regex="$2" ok_msg="$3" fail_msg="$4" mode="${5:-cli}"
+  if grep -qE "$regex" "$file" 2>/dev/null; then
+    if [[ "$mode" == "html" ]]; then add_html_check ok "$ok_msg"; else check_ok "$ok_msg"; fi
+  else
+    if [[ "$mode" == "html" ]]; then add_html_check warn "$fail_msg"; else check_fail "$fail_msg"; fi
+  fi
+}
+
+# Usage: result=$(safe_count "pattern" "file")
+safe_count() {
+  local pattern="$1" source="$2"
+  local count
+  if [[ -f "$source" ]]; then
+    count=$(grep -c "$pattern" "$source" 2>/dev/null) || true
+  else
+    count=$(echo "$source" | grep -c "$pattern" 2>/dev/null) || true
+  fi
+  echo "${count:-0}"
+}
+
+# (#9 — Phase 3) Calcule le nombre de jours entre une epoch et maintenant
+# Usage: age=$(days_since <epoch>)   ou   remaining=$(days_until <epoch>)
+days_since() {
+  local epoch="${1:-0}"
+  echo $(( ($(date +%s) - epoch) / 86400 ))
+}
+days_until() {
+  local epoch="${1:-0}"
+  echo $(( (epoch - $(date +%s)) / 86400 ))
+}
+
+# (#10 — Phase 3) Ajoute une ligne à un fichier si elle n'y est pas déjà
+# Usage: add_line_if_missing "pattern" "line" "file"
+add_line_if_missing() {
+  local pattern="$1" line="$2" file="$3"
+  grep -q "$pattern" "$file" 2>/dev/null || echo "$line" >> "$file"
+}
+
 # ================================== MODULES D'INSTALLATION ============================
 # Chaque module est une fonction install_<nom>() suivant le principe SRP (Single Responsibility)
 #
@@ -869,17 +977,19 @@ check_db_freshness() {
 #   INSTALL_BASHRC_GLOBAL → section 16) .bashrc global
 #
 # Pour ajouter un nouveau module :
-#   1. Ajouter le flag INSTALL_XXX dans save_config/ask_all_questions
-#   2. Créer la fonction install_xxx() ou le bloc if $INSTALL_XXX
-#   3. Ajouter la vérification dans la section VÉRIFICATIONS
-#   4. Mettre à jour ce registre
+#   1. Ajouter le flag INSTALL_XXX + default dans save_config/ask_all_questions/defaults
+#   2. Créer le bloc d'installation : if $INSTALL_XXX; then ... fi
+#   3. Ajouter la vérification CLI dans la section VÉRIFICATIONS
+#   4. Ajouter la vérification HTML dans la section MODE AUDIT
+#   5. Mettre à jour ce registre
+#   6. Tester : bash -n + shellcheck + exécution sur VM de test
 
 install_locales() {
   section "Locales fr_FR"
   apt_install locales tzdata
   sed -i 's/^# *fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen
-  grep -q '^fr_FR ISO-8859-1' /etc/locale.gen || echo 'fr_FR ISO-8859-1' >> /etc/locale.gen
-  grep -q '^fr_FR@euro ISO-8859-15' /etc/locale.gen || echo 'fr_FR@euro ISO-8859-15' >> /etc/locale.gen
+  add_line_if_missing '^fr_FR ISO-8859-1' 'fr_FR ISO-8859-1' /etc/locale.gen
+  add_line_if_missing '^fr_FR@euro ISO-8859-15' 'fr_FR@euro ISO-8859-15' /etc/locale.gen
   locale-gen | tee -a "$LOG_FILE"
   update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr LC_TIME=fr_FR.UTF-8 LC_NUMERIC=fr_FR.UTF-8 LC_MONETARY=fr_FR.UTF-8 LC_PAPER=fr_FR.UTF-8 LC_MEASUREMENT=fr_FR.UTF-8
   timedatectl set-timezone "$TIMEZONE" || true
@@ -929,10 +1039,10 @@ PubkeyAuthentication yes
 AllowUsers ${ADMIN_USER}
 HostKey /etc/ssh/ssh_host_ed25519_key
 HostKey /etc/ssh/ssh_host_rsa_key
-Ciphers chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr
-MACs hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com
+Ciphers ${SSH_CIPHERS}
+MACs ${SSH_MACS}
 # Post-quantum hybrid (protection contre "store now, decrypt later")
-KexAlgorithms sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org
+KexAlgorithms ${SSH_KEX}
 ClientAliveInterval 300
 ClientAliveCountMax 2
 LoginGraceTime 20
@@ -990,7 +1100,7 @@ for country in $COUNTRIES; do
   url="https://www.ipdeny.com/ipblocks/data/countries/${country}.zone"
   while read -r ip; do
     [[ -n "$ip" ]] && ipset add geoip_blocked_new "$ip" 2>/dev/null || true
-  done < <(curl -s "$url" 2>/dev/null)
+  done < <(curl -sfS --max-time "${CURL_TIMEOUT}" "$url" 2>/dev/null)
 done
 
 # Remplacer l'ancien set par le nouveau
@@ -1150,20 +1260,14 @@ EOF
   for INI in /etc/php/*/apache2/php.ini /etc/php/*/cli/php.ini /etc/php/*/fpm/php.ini; do
     [[ -f "$INI" ]] || continue
     backup_file "$INI"
-    # Activer opcache
-    sed -ri 's/^;?\s*opcache\.enable\s*=.*/opcache.enable=1/' "$INI"
-    # Masquer la version PHP
-    sed -ri 's/^;?\s*expose_php\s*=.*/expose_php = Off/' "$INI"
-    # Désactiver l'affichage des erreurs en production
-    sed -ri 's/^;?\s*display_errors\s*=.*/display_errors = Off/' "$INI"
-    # Désactiver les erreurs de startup
-    sed -ri 's/^;?\s*display_startup_errors\s*=.*/display_startup_errors = Off/' "$INI"
-    # Logger les erreurs au lieu de les afficher
-    sed -ri 's/^;?\s*log_errors\s*=.*/log_errors = On/' "$INI"
-    # Désactiver les fonctions dangereuses (optionnel)
+    php_ini_set "opcache\.enable" "1" "$INI"
+    php_ini_set "expose_php" "Off" "$INI"
+    php_ini_set "display_errors" "Off" "$INI"
+    php_ini_set "display_startup_errors" "Off" "$INI"
+    php_ini_set "log_errors" "On" "$INI"
     if $PHP_DISABLE_FUNCTIONS; then
       if ! grep -q "^disable_functions.*exec" "$INI"; then
-        sed -ri 's/^;?\s*disable_functions\s*=.*/disable_functions = exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source/' "$INI"
+        php_ini_set "disable_functions" "${PHP_DISABLED_FUNCTIONS}" "$INI"
       fi
     fi
   done
@@ -1209,276 +1313,14 @@ TRUSTEDIPS
     sed -i "s|__TRUSTED_IPS_ARRAY__|    // Aucune IP configurée|" /var/www/error-pages/trusted-ips.php
   fi
 
-  # Template principal des pages d'erreur
-  cat >/var/www/error-pages/error.php <<'ERRORPAGE'
-<?php
-require_once __DIR__ . '/trusted-ips.php';
-
-// Récupérer le code d'erreur depuis l'URL ou la variable d'environnement
-$error_code = $_GET['code'] ?? $_SERVER['REDIRECT_STATUS'] ?? 500;
-$error_code = (int) $error_code;
-
-// Messages d'erreur
-$errors = [
-    400 => ['title' => 'Requête invalide', 'message' => 'Le serveur n\'a pas pu comprendre votre requête.', 'icon' => '🚫'],
-    401 => ['title' => 'Authentification requise', 'message' => 'Vous devez vous identifier pour accéder à cette ressource.', 'icon' => '🔐'],
-    403 => ['title' => 'Accès interdit', 'message' => 'Vous n\'avez pas les permissions pour accéder à cette ressource.', 'icon' => '⛔'],
-    404 => ['title' => 'Page introuvable', 'message' => 'La page que vous recherchez n\'existe pas ou a été déplacée.', 'icon' => '🔍'],
-    500 => ['title' => 'Erreur serveur', 'message' => 'Une erreur interne s\'est produite. Nos équipes sont informées.', 'icon' => '⚙️'],
-    502 => ['title' => 'Passerelle incorrecte', 'message' => 'Le serveur a reçu une réponse invalide d\'un serveur en amont.', 'icon' => '🔗'],
-    503 => ['title' => 'Service indisponible', 'message' => 'Le serveur est temporairement indisponible. Réessayez dans quelques instants.', 'icon' => '🔧'],
-];
-
-$error = $errors[$error_code] ?? $errors[500];
-$is_trusted = is_trusted_ip();
-
-http_response_code($error_code);
-?>
-<!DOCTYPE html>
-<html lang="fr">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <meta name="robots" content="noindex, nofollow">
-    <title>Erreur <?= $error_code ?> - <?= htmlspecialchars($error['title']) ?></title>
-    <style>
-        :root {
-            --primary: #2563eb;
-            --danger: #dc2626;
-            --warning: #f59e0b;
-            --bg: #f8fafc;
-            --card: #ffffff;
-            --text: #1e293b;
-            --muted: #64748b;
-            --border: #e2e8f0;
-        }
-
-        @media (prefers-color-scheme: dark) {
-            :root {
-                --bg: #0f172a;
-                --card: #1e293b;
-                --text: #f1f5f9;
-                --muted: #94a3b8;
-                --border: #334155;
-            }
-        }
-
-        * { box-sizing: border-box; margin: 0; padding: 0; }
-
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-            background: var(--bg);
-            color: var(--text);
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 1rem;
-            line-height: 1.6;
-        }
-
-        .container {
-            max-width: 600px;
-            width: 100%;
-        }
-
-        .card {
-            background: var(--card);
-            border-radius: 1rem;
-            box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-            overflow: hidden;
-        }
-
-        .header {
-            background: linear-gradient(135deg, var(--danger) 0%, #991b1b 100%);
-            color: white;
-            padding: 2rem;
-            text-align: center;
-        }
-
-        .error-code {
-            font-size: 5rem;
-            font-weight: 800;
-            line-height: 1;
-            opacity: 0.9;
-        }
-
-        .error-icon {
-            font-size: 3rem;
-            margin-bottom: 0.5rem;
-        }
-
-        .content {
-            padding: 2rem;
-        }
-
-        h1 {
-            font-size: 1.5rem;
-            margin-bottom: 0.5rem;
-            color: var(--text);
-        }
-
-        .message {
-            color: var(--muted);
-            margin-bottom: 1.5rem;
-        }
-
-        .btn {
-            display: inline-block;
-            padding: 0.75rem 1.5rem;
-            background: var(--primary);
-            color: white;
-            text-decoration: none;
-            border-radius: 0.5rem;
-            font-weight: 500;
-            transition: opacity 0.2s;
-        }
-
-        .btn:hover { opacity: 0.9; }
-
-        .debug {
-            margin-top: 2rem;
-            padding-top: 1.5rem;
-            border-top: 1px solid var(--border);
-        }
-
-        .debug-title {
-            font-size: 0.875rem;
-            font-weight: 600;
-            color: var(--warning);
-            margin-bottom: 1rem;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }
-
-        .debug-grid {
-            display: grid;
-            gap: 0.5rem;
-            font-size: 0.8rem;
-        }
-
-        .debug-item {
-            display: grid;
-            grid-template-columns: 140px 1fr;
-            gap: 0.5rem;
-            padding: 0.5rem;
-            background: var(--bg);
-            border-radius: 0.25rem;
-        }
-
-        .debug-key {
-            font-weight: 600;
-            color: var(--muted);
-        }
-
-        .debug-value {
-            word-break: break-all;
-            font-family: monospace;
-        }
-
-        .footer {
-            text-align: center;
-            padding: 1rem 2rem 2rem;
-            color: var(--muted);
-            font-size: 0.75rem;
-        }
-
-        @media (max-width: 480px) {
-            .error-code { font-size: 4rem; }
-            .debug-item { grid-template-columns: 1fr; }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="card">
-            <div class="header">
-                <div class="error-icon"><?= $error['icon'] ?></div>
-                <div class="error-code"><?= $error_code ?></div>
-            </div>
-
-            <div class="content">
-                <h1><?= htmlspecialchars($error['title']) ?></h1>
-                <p class="message"><?= htmlspecialchars($error['message']) ?></p>
-
-                <a href="/" class="btn">← Retour à l'accueil</a>
-
-                <?php if ($is_trusted): ?>
-                <div class="debug">
-                    <div class="debug-title">
-                        🔧 Informations de debug (IP de confiance)
-                    </div>
-                    <div class="debug-grid">
-                        <div class="debug-item">
-                            <span class="debug-key">Votre IP</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['REMOTE_ADDR'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">URI demandée</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['REQUEST_URI'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Méthode</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['REQUEST_METHOD'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Referer</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['HTTP_REFERER'] ?? 'Direct') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">User-Agent</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['HTTP_USER_AGENT'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Serveur</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['SERVER_NAME'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Port</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['SERVER_PORT'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Protocole</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['SERVER_PROTOCOL'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Document Root</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['DOCUMENT_ROOT'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Script</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['SCRIPT_FILENAME'] ?? 'N/A') ?></span>
-                        </div>
-                        <div class="debug-item">
-                            <span class="debug-key">Timestamp</span>
-                            <span class="debug-value"><?= date('Y-m-d H:i:s T') ?></span>
-                        </div>
-                        <?php if (!empty($_SERVER['REDIRECT_URL'])): ?>
-                        <div class="debug-item">
-                            <span class="debug-key">Redirect URL</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['REDIRECT_URL']) ?></span>
-                        </div>
-                        <?php endif; ?>
-                        <?php if (!empty($_SERVER['REDIRECT_QUERY_STRING'])): ?>
-                        <div class="debug-item">
-                            <span class="debug-key">Query String</span>
-                            <span class="debug-value"><?= htmlspecialchars($_SERVER['REDIRECT_QUERY_STRING']) ?></span>
-                        </div>
-                        <?php endif; ?>
-                    </div>
-                </div>
-                <?php endif; ?>
-            </div>
-
-            <div class="footer">
-                <?= htmlspecialchars($_SERVER['SERVER_SOFTWARE'] ?? 'Web Server') ?>
-            </div>
-        </div>
-    </div>
-</body>
-</html>
-ERRORPAGE
+  # Template principal des pages d'erreur (externalisé dans templates/error-page.php)
+  ERROR_PAGE_TEMPLATE="${SCRIPT_DIR}/templates/error-page.php"
+  [[ ! -f "$ERROR_PAGE_TEMPLATE" ]] && ERROR_PAGE_TEMPLATE="/root/scripts/templates/error-page.php"
+  if [[ -f "$ERROR_PAGE_TEMPLATE" ]]; then
+    cp "$ERROR_PAGE_TEMPLATE" /var/www/error-pages/error.php
+  else
+    warn "Template error-page.php non trouvé. Pages d'erreur non déployées."
+  fi
 
   # Configuration Apache pour les pages d'erreur
   cat >/etc/apache2/conf-available/custom-error-pages.conf <<'ERRORCONF'
@@ -1797,9 +1639,12 @@ if $INSTALL_COMPOSER; then
   # Télécharge et installe Composer pour l'utilisateur (download then execute)
   COMPOSER_INSTALLER="$(mktempfile .php)"
   curl -fsSL https://getcomposer.org/installer -o "$COMPOSER_INSTALLER"
-  # Vérification du hash (optionnel mais recommandé)
+  # Vérification du hash (obligatoire — sécurité supply chain)
   EXPECTED_SIG="$(curl -fsSL https://composer.github.io/installer.sig 2>/dev/null || true)"
-  if [[ -n "$EXPECTED_SIG" ]]; then
+  if [[ -z "$EXPECTED_SIG" ]]; then
+    warn "Impossible de récupérer la signature Composer. Installation annulée."
+    rm -f "$COMPOSER_INSTALLER"
+  else
     ACTUAL_SIG="$(php -r "echo hash_file('sha384', '$COMPOSER_INSTALLER');")"
     if [[ "$EXPECTED_SIG" != "$ACTUAL_SIG" ]]; then
       warn "Signature Composer invalide ! Installation annulée."
@@ -2124,7 +1969,7 @@ if ! command -v sendmail &>/dev/null; then
 fi
 
 MAILTO="__EMAIL__"
-IP=$(echo $SSH_CONNECTION | awk '{print $1}')
+IP=$(echo "$SSH_CONNECTION" | awk '{print $1}')
 USER=$(whoami)
 HOSTNAME=$(hostname -f)
 DATE=$(date '+%Y-%m-%d %H:%M:%S')
@@ -2186,9 +2031,15 @@ if $INSTALL_AIDE; then
 AIDECONF
 
   # Initialisation de la base de données (en arrière-plan car long)
-  log "Initialisation de la base AIDE (peut prendre plusieurs minutes)..."
-  aideinit &
-  AIDE_PID=$!
+  # Idempotent : ne ré-initialise que si la base n'existe pas
+  if [[ -f /var/lib/aide/aide.db ]]; then
+    log "AIDE : base existante détectée, initialisation ignorée."
+    AIDE_PID=""
+  else
+    log "Initialisation de la base AIDE (peut prendre plusieurs minutes)..."
+    aideinit &
+    AIDE_PID=$!
+  fi
 
   # Script de vérification avec rapport email
   mkdir -p /root/scripts
@@ -2522,7 +2373,7 @@ fi
 # GeoIP Block
 if $GEOIP_BLOCK; then
   if ipset list geoip_blocked >/dev/null 2>&1; then
-    GEOIP_COUNT=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]' || echo "0")
+    GEOIP_COUNT=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]') || GEOIP_COUNT=0
     check_ok "GeoIP : ${GEOIP_COUNT} plages bloquées"
   else
     check_fail "GeoIP : ipset geoip_blocked non trouvé"
@@ -2556,7 +2407,7 @@ if [[ -n "${TRUSTED_IPS:-}" ]]; then
   check_ok "IPs de confiance configurées : $TRUSTED_IPS"
   # Vérifier ModSecurity whitelist
   if [[ -f /etc/modsecurity/whitelist-trusted-ips.conf ]]; then
-    MODSEC_WHITELIST_COUNT=$(grep -c "SecRule REMOTE_ADDR" /etc/modsecurity/whitelist-trusted-ips.conf 2>/dev/null || echo "0")
+    MODSEC_WHITELIST_COUNT=$(safe_count "SecRule REMOTE_ADDR" /etc/modsecurity/whitelist-trusted-ips.conf)
     check_ok "ModSecurity whitelist : ${MODSEC_WHITELIST_COUNT} règle(s)"
   fi
 fi
@@ -2603,29 +2454,10 @@ if $INSTALL_SSH_HARDEN; then
   # Vérification des paramètres SSH
   SSHD_CONFIG="/etc/ssh/sshd_config"
 
-  if grep -qE "^PermitRootLogin\s+no" "$SSHD_CONFIG" 2>/dev/null; then
-    check_ok "SSH : connexion root désactivée"
-  else
-    check_fail "SSH : connexion root NON désactivée"
-  fi
-
-  if grep -qE "^PasswordAuthentication\s+no" "$SSHD_CONFIG" 2>/dev/null; then
-    check_ok "SSH : authentification par mot de passe désactivée"
-  else
-    check_fail "SSH : authentification par mot de passe NON désactivée"
-  fi
-
-  if grep -qE "^Port\s+${SSH_PORT}" "$SSHD_CONFIG" 2>/dev/null; then
-    check_ok "SSH : port ${SSH_PORT} configuré"
-  else
-    check_warn "SSH : port ${SSH_PORT} non trouvé dans config"
-  fi
-
-  if grep -qE "^AllowUsers\s+.*${ADMIN_USER}" "$SSHD_CONFIG" 2>/dev/null; then
-    check_ok "SSH : AllowUsers contient ${ADMIN_USER}"
-  else
-    check_warn "SSH : AllowUsers ne contient pas ${ADMIN_USER}"
-  fi
+  check_config_grep "$SSHD_CONFIG" "^PermitRootLogin\s+no" "SSH : connexion root désactivée" "SSH : connexion root NON désactivée"
+  check_config_grep "$SSHD_CONFIG" "^PasswordAuthentication\s+no" "SSH : auth par mot de passe désactivée" "SSH : auth par mot de passe NON désactivée"
+  check_config_grep "$SSHD_CONFIG" "^Port\s+${SSH_PORT}" "SSH : port ${SSH_PORT} configuré" "SSH : port ${SSH_PORT} non trouvé"
+  check_config_grep "$SSHD_CONFIG" "^AllowUsers\s+.*${ADMIN_USER}" "SSH : AllowUsers contient ${ADMIN_USER}" "SSH : AllowUsers sans ${ADMIN_USER}"
 fi
 
 echo ""
@@ -2696,8 +2528,7 @@ if $INSTALL_APACHE_PHP; then
       if [[ -f "$CERT_FILE" ]]; then
         CERT_EXPIRY=$(openssl x509 -enddate -noout -in "$CERT_FILE" 2>/dev/null | cut -d= -f2)
         CERT_EXPIRY_EPOCH=$(date -d "$CERT_EXPIRY" +%s 2>/dev/null || echo 0)
-        NOW_EPOCH=$(date +%s)
-        DAYS_LEFT=$(( (CERT_EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+        DAYS_LEFT=$(days_until "$CERT_EXPIRY_EPOCH")
         if [[ "$DAYS_LEFT" -gt "$SSL_WARN_DAYS" ]]; then
           check_ok "SSL : certificat valide (expire dans ${DAYS_LEFT} jours)"
         elif [[ "$DAYS_LEFT" -gt 7 ]]; then
@@ -2791,7 +2622,7 @@ if [[ -f /etc/logrotate.conf ]]; then
   if [[ -f /var/lib/logrotate/status ]]; then
     LOGROTATE_DATE=$(stat -c %Y /var/lib/logrotate/status 2>/dev/null)
     if [[ -n "$LOGROTATE_DATE" ]]; then
-      LOGROTATE_AGE=$(( ($(date +%s) - $LOGROTATE_DATE) / 86400 ))
+      LOGROTATE_AGE=$(days_since "$LOGROTATE_DATE")
       if [[ "$LOGROTATE_AGE" -le 1 ]]; then
         check_ok "Logrotate : exécuté dans les dernières 24h"
       elif [[ "$LOGROTATE_AGE" -le 7 ]]; then
@@ -2985,12 +2816,7 @@ if $INSTALL_POSTFIX_DKIM; then
   if [[ -f "$DKIM_KEY" ]]; then
     check_ok "DKIM : clé privée présente"
     # Vérifier les permissions
-    DKIM_PERMS=$(stat -c %a "$DKIM_KEY" 2>/dev/null)
-    if [[ "$DKIM_PERMS" == "600" ]]; then
-      check_ok "DKIM : permissions clé privée correctes (600)"
-    else
-      check_warn "DKIM : permissions clé privée = ${DKIM_PERMS} (devrait être 600)"
-    fi
+    check_file_perms "$DKIM_KEY" "DKIM : clé privée" "600"
   else
     check_fail "DKIM : clé privée absente"
   fi
@@ -3014,7 +2840,7 @@ if $INSTALL_POSTFIX_DKIM; then
   # Comparaison clé locale vs DNS via dig
   if command -v dig >/dev/null 2>&1 && [[ -f "$DKIM_PUB" ]]; then
     DKIM_DNS_RECORD="${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}"
-    DNS_KEY=$(dig +short TXT "$DKIM_DNS_RECORD" @8.8.8.8 2>/dev/null | tr -d '"\n ' | grep -oP 'p=\K[^;]+')
+    DNS_KEY=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "$DKIM_DNS_RECORD" @8.8.8.8 2>/dev/null | tr -d '"\n ' | grep -oP 'p=\K[^;]+')
     LOCAL_KEY=$(cat "$DKIM_PUB" 2>/dev/null | tr -d '"\n\t ()' | grep -oP 'p=\K[^;]+' | head -1)
 
     if [[ -z "$DNS_KEY" ]]; then
@@ -3035,15 +2861,15 @@ if $INSTALL_POSTFIX_DKIM; then
   if echo "$MAIL_QUEUE" | grep -q "Mail queue is empty"; then
     check_ok "Postfix : file d'attente vide (tous les emails envoyés)"
   elif echo "$MAIL_QUEUE" | grep -qE "^[0-9]+ Kbytes"; then
-    QUEUED_COUNT=$(mailq 2>/dev/null | grep -c "^[A-F0-9]" || echo "0")
+    QUEUED_COUNT=$(mailq 2>/dev/null | grep -c "^[A-F0-9]") || QUEUED_COUNT=0
     check_warn "Postfix : ${QUEUED_COUNT} email(s) en attente (mailq pour détails)"
   fi
 
   # Vérification derniers envois
   if [[ -f /var/log/mail.log ]]; then
-    BOUNCED_24H=$(grep -c "status=bounced" /var/log/mail.log 2>/dev/null || echo "0")
-    DEFERRED_24H=$(grep -c "status=deferred" /var/log/mail.log 2>/dev/null || echo "0")
-    SENT_24H=$(grep -c "status=sent" /var/log/mail.log 2>/dev/null || echo "0")
+    BOUNCED_24H=$(safe_count "status=bounced" /var/log/mail.log)
+    DEFERRED_24H=$(safe_count "status=deferred" /var/log/mail.log)
+    SENT_24H=$(safe_count "status=sent" /var/log/mail.log)
     if [[ "$BOUNCED_24H" -gt 0 ]]; then
       check_fail "Postfix : ${BOUNCED_24H} email(s) rejeté(s) (vérifier SPF/DKIM)"
     elif [[ "$DEFERRED_24H" -gt 0 ]]; then
@@ -3103,7 +2929,7 @@ printf "${BOLD}${MAGENTA}── Sécurité utilisateurs ──${RESET}\n"
 # Clé SSH admin
 USER_HOME="$(get_user_home)"
 if [[ -f "${USER_HOME}/.ssh/authorized_keys" ]] && [[ -s "${USER_HOME}/.ssh/authorized_keys" ]]; then
-  KEY_COUNT=$(grep -c "^ssh-" "${USER_HOME}/.ssh/authorized_keys" 2>/dev/null || echo 0)
+  KEY_COUNT=$(safe_count "^ssh-" "${USER_HOME}/.ssh/authorized_keys")
   check_ok "SSH : ${KEY_COUNT} clé(s) autorisée(s) pour ${ADMIN_USER}"
 else
   check_fail "SSH : aucune clé autorisée pour ${ADMIN_USER}"
@@ -3111,12 +2937,7 @@ fi
 
 # Permissions .ssh
 if [[ -d "${USER_HOME}/.ssh" ]]; then
-  SSH_DIR_PERMS=$(stat -c %a "${USER_HOME}/.ssh" 2>/dev/null)
-  if [[ "$SSH_DIR_PERMS" == "700" ]]; then
-    check_ok "SSH : permissions .ssh correctes (700)"
-  else
-    check_warn "SSH : permissions .ssh = ${SSH_DIR_PERMS} (devrait être 700)"
-  fi
+  check_file_perms "${USER_HOME}/.ssh" "SSH : .ssh" "700"
 fi
 
 # Root login direct désactivé
@@ -3143,7 +2964,7 @@ fi
 
 # Dernières connexions SSH (échecs)
 if [[ -f /var/log/auth.log ]]; then
-  FAILED_SSH_24H=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
+  FAILED_SSH_24H=$(safe_count "Failed password" /var/log/auth.log)
   if [[ "$FAILED_SSH_24H" -eq 0 ]]; then
     check_ok "SSH : pas de tentatives échouées récentes"
   elif [[ "$FAILED_SSH_24H" -lt 50 ]]; then
@@ -3189,12 +3010,7 @@ else
 fi
 
 # Permissions /etc/shadow
-SHADOW_PERMS=$(stat -c %a /etc/shadow 2>/dev/null)
-if [[ "$SHADOW_PERMS" =~ ^(0|640|600)$ ]]; then
-  check_ok "Shadow : permissions correctes (${SHADOW_PERMS})"
-else
-  check_warn "Shadow : permissions = ${SHADOW_PERMS} (devrait être 640 ou 600)"
-fi
+check_file_perms /etc/shadow "Shadow" "0|640|600"
 
 echo ""
 printf "${BOLD}${MAGENTA}── Base de données ──${RESET}\n"
@@ -3305,7 +3121,7 @@ else
 fi
 
 # Processus zombies
-ZOMBIES=$(ps aux | grep -c ' Z ' 2>/dev/null || echo 0)
+ZOMBIES=$(ps aux | grep -c ' Z ' 2>/dev/null) || ZOMBIES=0
 # Exclure la ligne du grep elle-même
 ZOMBIES=$((ZOMBIES > 0 ? ZOMBIES - 1 : 0))
 if [[ "$ZOMBIES" -eq 0 ]]; then
@@ -3344,7 +3160,7 @@ ss -tlnp 2>/dev/null | grep LISTEN | awk '{print $4}' | sort -u | while read -r 
   PORT=$(echo "$addr" | rev | cut -d: -f1 | rev)
   BIND=$(echo "$addr" | rev | cut -d: -f2- | rev)
   case "$PORT" in
-    22|${SSH_PORT}) SVC="SSH" ;;
+    22|"${SSH_PORT}") SVC="SSH" ;;
     80) SVC="HTTP" ;;
     443) SVC="HTTPS" ;;
     3306) SVC="MariaDB" ;;
@@ -3363,7 +3179,7 @@ echo ""
 printf "${BOLD}${MAGENTA}── Vérification DNS ──${RESET}\n"
 
 # IP publique du serveur
-SERVER_IP=$(curl -s --max-time 5 https://api.ipify.org 2>/dev/null || curl -s --max-time 5 https://ifconfig.me 2>/dev/null || echo "")
+SERVER_IP=$(curl -sfS --max-time "${CURL_TIMEOUT}" https://api.ipify.org 2>/dev/null || curl -sfS --max-time "${CURL_TIMEOUT}" https://ifconfig.me 2>/dev/null || echo "")
 
 if [[ -n "$SERVER_IP" ]]; then
   printf "  ${CYAN}IP publique : %s${RESET}\n" "$SERVER_IP"
@@ -3382,7 +3198,7 @@ fi
 
 # Vérification enregistrement A (utilise DNS public pour éviter cache local)
 if command -v dig >/dev/null 2>&1; then
-  DNS_A=$(dig +short A "$HOSTNAME_FQDN" @8.8.8.8 2>/dev/null | head -1)
+  DNS_A=$(dig +short +timeout="${DNS_TIMEOUT}" A "$HOSTNAME_FQDN" @8.8.8.8 2>/dev/null | head -1)
   if [[ -n "$DNS_A" ]]; then
     if [[ "$DNS_A" == "$SERVER_IP" ]]; then
       check_ok "DNS A : ${HOSTNAME_FQDN} → ${DNS_A} (correspond à ce serveur)"
@@ -3394,7 +3210,7 @@ if command -v dig >/dev/null 2>&1; then
   fi
 
   # Vérification www
-  DNS_WWW=$(dig +short A "www.${HOSTNAME_FQDN}" @8.8.8.8 2>/dev/null | head -1)
+  DNS_WWW=$(dig +short +timeout="${DNS_TIMEOUT}" A "www.${HOSTNAME_FQDN}" @8.8.8.8 2>/dev/null | head -1)
   if [[ -n "$DNS_WWW" ]]; then
     if [[ "$DNS_WWW" == "$SERVER_IP" || "$DNS_WWW" == "$DNS_A" ]]; then
       check_ok "DNS A : www.${HOSTNAME_FQDN} → ${DNS_WWW}"
@@ -3406,7 +3222,7 @@ if command -v dig >/dev/null 2>&1; then
   fi
 
   # MX records
-  DNS_MX=$(dig +short MX "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | head -1)
+  DNS_MX=$(dig +short +timeout="${DNS_TIMEOUT}" MX "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | head -1)
   if [[ -n "$DNS_MX" ]]; then
     check_ok "DNS MX : ${BASE_DOMAIN} → ${DNS_MX}"
   else
@@ -3414,7 +3230,7 @@ if command -v dig >/dev/null 2>&1; then
   fi
 
   # SPF record
-  DNS_SPF=$(dig +short TXT "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | grep -i "v=spf1" | head -1 || true)
+  DNS_SPF=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | grep -i "v=spf1" | head -1 || true)
   if [[ -n "$DNS_SPF" ]]; then
     if echo "$DNS_SPF" | grep -qE "(include:|a |mx |ip4:)"; then
       check_ok "DNS SPF : ${DNS_SPF}"
@@ -3427,7 +3243,7 @@ if command -v dig >/dev/null 2>&1; then
 
   # DKIM record
   if [[ -n "${DKIM_SELECTOR:-}" && -n "${DKIM_DOMAIN:-}" ]]; then
-    DNS_DKIM=$(dig +short TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @8.8.8.8 2>/dev/null | head -1)
+    DNS_DKIM=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @8.8.8.8 2>/dev/null | head -1)
     if [[ -n "$DNS_DKIM" ]]; then
       if echo "$DNS_DKIM" | grep -q "v=DKIM1"; then
         check_ok "DNS DKIM : ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} configuré"
@@ -3440,7 +3256,7 @@ if command -v dig >/dev/null 2>&1; then
   fi
 
   # DMARC record
-  DNS_DMARC=$(dig +short TXT "_dmarc.${BASE_DOMAIN}" @8.8.8.8 2>/dev/null | grep -i "v=DMARC1" | head -1 || true)
+  DNS_DMARC=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "_dmarc.${BASE_DOMAIN}" @8.8.8.8 2>/dev/null | grep -i "v=DMARC1" | head -1 || true)
   if [[ -n "$DNS_DMARC" ]]; then
     if echo "$DNS_DMARC" | grep -qE "p=(none|quarantine|reject)"; then
       DMARC_POLICY=$(echo "$DNS_DMARC" | grep -oE "p=(none|quarantine|reject)" | cut -d= -f2)
@@ -3458,7 +3274,7 @@ if command -v dig >/dev/null 2>&1; then
 
   # PTR (reverse DNS)
   if [[ -n "$SERVER_IP" ]]; then
-    DNS_PTR=$(dig +short -x "$SERVER_IP" 2>/dev/null | head -1 | sed 's/\.$//')
+    DNS_PTR=$(dig +short +timeout="${DNS_TIMEOUT}" -x "$SERVER_IP" 2>/dev/null | head -1 | sed 's/\.$//')
     if [[ -n "$DNS_PTR" ]]; then
       if [[ "$DNS_PTR" == "$HOSTNAME_FQDN" || "$DNS_PTR" == *"$BASE_DOMAIN"* ]]; then
         check_ok "DNS PTR : ${SERVER_IP} → ${DNS_PTR}"
@@ -3683,6 +3499,12 @@ printf "${CYAN}Fichier log :${RESET} %s\n\n" "${LOG_FILE}"
 if $AUDIT_MODE; then
   AUDIT_REPORT="$(mktempfile .html)"
 
+  # Date patterns Apache/modsec (locale C, calculés une seule fois)
+  AUDIT_TODAY=$(LC_TIME=C date '+%d/%b/%Y')
+  AUDIT_YESTERDAY=$(LC_TIME=C date -d "yesterday" '+%d/%b/%Y')
+  AUDIT_TODAY_ERR=$(LC_TIME=C date '+%a %b %d')
+  AUDIT_YESTERDAY_ERR=$(LC_TIME=C date -d "yesterday" '+%a %b %d')
+
   # Génère le rapport HTML avec charte graphique Since & Co
   # Version email-compatible (tables, inline styles, pas de SVG)
   # Couleurs: #dc5c3b (orange), #142136 (bleu foncé), #f2fafa (fond), #99c454 (vert)
@@ -3860,12 +3682,12 @@ PROGHTML
 
   # Sécurité SSH
   add_html_section "Sécurité SSH"
-  grep -qE "^\s*PermitRootLogin\s+no" /etc/ssh/sshd_config && add_html_check ok "Root login désactivé" || add_html_check warn "Root login non désactivé"
-  grep -qE "^\s*PasswordAuthentication\s+no" /etc/ssh/sshd_config && add_html_check ok "Auth par mot de passe désactivée" || add_html_check warn "Auth par mot de passe active"
-  grep -qE "^\s*Port\s+${SSH_PORT}" /etc/ssh/sshd_config && add_html_check ok "Port SSH : ${SSH_PORT}" || add_html_check warn "Port SSH non configuré"
+  check_config_grep /etc/ssh/sshd_config "^\s*PermitRootLogin\s+no" "Root login désactivé" "Root login non désactivé" html
+  check_config_grep /etc/ssh/sshd_config "^\s*PasswordAuthentication\s+no" "Auth par mot de passe désactivée" "Auth par mot de passe active" html
+  check_config_grep /etc/ssh/sshd_config "^\s*Port\s+${SSH_PORT}" "Port SSH : ${SSH_PORT}" "Port SSH non configuré" html
   # Tentatives échouées
   if [[ -f /var/log/auth.log ]]; then
-    FAILED_SSH_HTML=$(grep -c "Failed password" /var/log/auth.log 2>/dev/null || echo 0)
+    FAILED_SSH_HTML=$(safe_count "Failed password" /var/log/auth.log)
     if [[ "$FAILED_SSH_HTML" -lt 50 ]]; then
       add_html_check ok "${FAILED_SSH_HTML} tentatives SSH échouées"
     else
@@ -3884,7 +3706,7 @@ PROGHTML
     if $INSTALL_CERTBOT && [[ -f "/etc/letsencrypt/live/${HOSTNAME_FQDN}/cert.pem" ]]; then
       CERT_EXP_HTML=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/${HOSTNAME_FQDN}/cert.pem" 2>/dev/null | cut -d= -f2)
       CERT_EXP_EPOCH_HTML=$(date -d "$CERT_EXP_HTML" +%s 2>/dev/null || echo 0)
-      DAYS_LEFT_HTML=$(( (CERT_EXP_EPOCH_HTML - $(date +%s)) / 86400 ))
+      DAYS_LEFT_HTML=$(days_until "$CERT_EXP_EPOCH_HTML")
       if [[ "$DAYS_LEFT_HTML" -gt "$SSL_WARN_DAYS" ]]; then
         add_html_check ok "SSL : expire dans ${DAYS_LEFT_HTML} jours"
       elif [[ "$DAYS_LEFT_HTML" -gt 10 ]]; then
@@ -3916,7 +3738,7 @@ PROGHTML
   # GeoIP - Pays bloqués
   if $GEOIP_BLOCK; then
     if ipset list geoip_blocked >/dev/null 2>&1; then
-      GEOIP_RANGES_HTML=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]' || echo "0")
+      GEOIP_RANGES_HTML=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]') || GEOIP_RANGES_HTML=0
       add_html_check ok "GeoIP : ${GEOIP_RANGES_HTML} plages IP bloquées (${GEOIP_COUNTRY_COUNT} pays)"
       add_stats_grid_open
       add_stat_box "${GEOIP_RANGES_HTML}" "Plages bloquées" "accent"
@@ -3933,11 +3755,9 @@ PROGHTML
   if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
     MODSEC_LOG="/var/log/apache2/modsec_audit.log"
     if [[ -f "$MODSEC_LOG" ]]; then
-      # Compter les événements des dernières 24h
-      YESTERDAY=$(date -d "yesterday" '+%d/%b/%Y')
-      TODAY=$(date '+%d/%b/%Y')
-      MODSEC_EVENTS_24H=$(grep -cE "\[${TODAY}|\[${YESTERDAY}" "$MODSEC_LOG" 2>/dev/null || echo "0")
-      MODSEC_TOTAL=$(wc -l < "$MODSEC_LOG" 2>/dev/null || echo "0")
+      # Compter les événements des dernières 24h (réutilise AUDIT_TODAY/AUDIT_YESTERDAY)
+      MODSEC_EVENTS_24H=$(grep -cE "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$MODSEC_LOG" 2>/dev/null) || MODSEC_EVENTS_24H=0
+      MODSEC_TOTAL=$(wc -l < "$MODSEC_LOG" 2>/dev/null) || MODSEC_TOTAL=0
 
       # Mode (DetectionOnly ou On)
       if grep -q "SecRuleEngine On" /etc/modsecurity/modsecurity.conf 2>/dev/null; then
@@ -3976,16 +3796,14 @@ PROGHTML
 
     ACCESS_LOG="/var/log/apache2/access.log"
     ERROR_LOG="/var/log/apache2/error.log"
-    # Forcer locale C pour avoir Jan/Feb/Mar (format Apache) au lieu de janv./févr./mars
-    TODAY_PATTERN=$(LC_TIME=C date '+%d/%b/%Y')
-    YESTERDAY_PATTERN=$(LC_TIME=C date -d "yesterday" '+%d/%b/%Y')
+    # Les date patterns AUDIT_TODAY/AUDIT_YESTERDAY sont calculés une seule fois en début de section audit
 
     if [[ -f "$ACCESS_LOG" ]]; then
       # Stats générales access.log (head -1 pour éviter les multi-lignes)
-      TOTAL_REQUESTS=$(grep -cE "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | head -1 || echo "0")
-      TOTAL_404=$(grep -E "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | grep -c '" 404 ' | head -1 || echo "0")
-      TOTAL_500=$(grep -E "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | grep -c '" 50[0-9] ' | head -1 || echo "0")
-      UNIQUE_IPS=$(grep -E "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | awk '{print $1}' | sort -u | wc -l | tr -d ' ' || echo "0")
+      TOTAL_REQUESTS=$(grep -cE "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | head -1 || echo "0")
+      TOTAL_404=$(grep -E "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | grep -c '" 404 ' | head -1 || echo "0")
+      TOTAL_500=$(grep -E "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | grep -c '" 50[0-9] ' | head -1 || echo "0")
+      UNIQUE_IPS=$(grep -E "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | awk '{print $1}' | sort -u | wc -l | tr -d ' ' || echo "0")
       # Nettoyer les valeurs (supprimer espaces/newlines)
       TOTAL_REQUESTS=${TOTAL_REQUESTS//[^0-9]/}; [[ -z "$TOTAL_REQUESTS" ]] && TOTAL_REQUESTS=0
       TOTAL_404=${TOTAL_404//[^0-9]/}; [[ -z "$TOTAL_404" ]] && TOTAL_404=0
@@ -4002,8 +3820,8 @@ PROGHTML
       add_stats_grid_close
 
       # Détection URLs suspectes (scanners de vulnérabilités)
-      SUSPICIOUS_PATTERNS='(wp-login|wp-admin|wp-content|wp-includes|xmlrpc\.php|\.env|\.git|phpinfo|phpmyadmin|pma|adminer|\.sql|\.bak|\.zip|\.tar|\.rar|shell|eval\(|base64|union.*select|concat\(|etc/passwd|\.\.\/|%2e%2e|<script|\.asp|\.aspx|cgi-bin|\.cgi)'
-      SUSPICIOUS_HITS=$(grep -iE "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | grep -icE "$SUSPICIOUS_PATTERNS" | head -1 || echo "0")
+      SUSPICIOUS_PATTERNS="$SUSPICIOUS_URL_PATTERNS"
+      SUSPICIOUS_HITS=$(grep -iE "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | grep -icE "$SUSPICIOUS_PATTERNS" | head -1 || echo "0")
       SUSPICIOUS_HITS=${SUSPICIOUS_HITS//[^0-9]/}; [[ -z "$SUSPICIOUS_HITS" ]] && SUSPICIOUS_HITS=0
 
       if [[ "$SUSPICIOUS_HITS" -gt 100 ]]; then
@@ -4018,7 +3836,7 @@ PROGHTML
 
       # Top 5 URLs suspectes
       if [[ "$SUSPICIOUS_HITS" -gt 0 ]]; then
-        TOP_SUSPICIOUS=$(grep -iE "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | \
+        TOP_SUSPICIOUS=$(grep -iE "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | \
           grep -iE "$SUSPICIOUS_PATTERNS" | \
           awk '{print $7}' | sort | uniq -c | sort -rn | head -3 | \
           awk '{printf "%s (%d), ", $2, $1}' | sed 's/, $//')
@@ -4026,8 +3844,8 @@ PROGHTML
       fi
 
       # Bots malveillants (User-Agents suspects)
-      BAD_BOTS='(nikto|sqlmap|nmap|masscan|zgrab|census|shodan|curl/|wget/|python-requests|go-http|libwww|scanner|exploit|vulnerability|attack)'
-      BAD_BOT_HITS=$(grep -iE "\[${TODAY_PATTERN}|\[${YESTERDAY_PATTERN}" "$ACCESS_LOG" 2>/dev/null | grep -icE "$BAD_BOTS" | head -1 || echo "0")
+      BAD_BOTS="$BAD_BOT_AGENTS"
+      BAD_BOT_HITS=$(grep -iE "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" 2>/dev/null | grep -icE "$BAD_BOTS" | head -1 || echo "0")
       BAD_BOT_HITS=${BAD_BOT_HITS//[^0-9]/}; [[ -z "$BAD_BOT_HITS" ]] && BAD_BOT_HITS=0
 
       if [[ "$BAD_BOT_HITS" -gt 50 ]]; then
@@ -4043,12 +3861,9 @@ PROGHTML
 
     # Erreurs Apache (error.log)
     if [[ -f "$ERROR_LOG" ]]; then
-      # Forcer locale C pour avoir Mon Jan 06 au lieu de lun. janv. 06
-      TODAY_ERR=$(LC_TIME=C date '+%a %b %d')
-      YESTERDAY_ERR=$(LC_TIME=C date -d "yesterday" '+%a %b %d')
-      PHP_ERRORS=$(grep -cE "^\[${TODAY_ERR}|^\[${YESTERDAY_ERR}" "$ERROR_LOG" 2>/dev/null | head -1 || echo "0")
+      PHP_ERRORS=$(grep -cE "^\[${AUDIT_TODAY_ERR}|^\[${AUDIT_YESTERDAY_ERR}" "$ERROR_LOG" 2>/dev/null | head -1 || echo "0")
       PHP_ERRORS=${PHP_ERRORS//[^0-9]/}; [[ -z "$PHP_ERRORS" ]] && PHP_ERRORS=0
-      PHP_FATAL=$(grep -E "^\[${TODAY_ERR}|^\[${YESTERDAY_ERR}" "$ERROR_LOG" 2>/dev/null | grep -ic "fatal\|critical" | head -1 || echo "0")
+      PHP_FATAL=$(grep -E "^\[${AUDIT_TODAY_ERR}|^\[${AUDIT_YESTERDAY_ERR}" "$ERROR_LOG" 2>/dev/null | grep -ic "fatal\|critical" | head -1 || echo "0")
       PHP_FATAL=${PHP_FATAL//[^0-9]/}; [[ -z "$PHP_FATAL" ]] && PHP_FATAL=0
 
       if [[ "$PHP_FATAL" -gt 0 ]]; then
@@ -4097,13 +3912,13 @@ PROGHTML
     if echo "$MAIL_QUEUE_HTML" | grep -q "Mail queue is empty"; then
       add_html_check ok "File d'attente vide"
     else
-      QUEUED_COUNT_HTML=$(mailq 2>/dev/null | grep -c "^[A-F0-9]" || echo "0")
+      QUEUED_COUNT_HTML=$(mailq 2>/dev/null | grep -c "^[A-F0-9]") || QUEUED_COUNT_HTML=0
       add_html_check warn "${QUEUED_COUNT_HTML} email(s) en attente"
     fi
     if [[ -f /var/log/mail.log ]]; then
-      BOUNCED_HTML=$(grep -c "status=bounced" /var/log/mail.log 2>/dev/null || echo "0")
-      DEFERRED_HTML=$(grep -c "status=deferred" /var/log/mail.log 2>/dev/null || echo "0")
-      SENT_HTML=$(grep -c "status=sent" /var/log/mail.log 2>/dev/null || echo "0")
+      BOUNCED_HTML=$(safe_count "status=bounced" /var/log/mail.log)
+      DEFERRED_HTML=$(safe_count "status=deferred" /var/log/mail.log)
+      SENT_HTML=$(safe_count "status=sent" /var/log/mail.log)
       [[ "$BOUNCED_HTML" -gt 0 ]] && add_html_check fail "${BOUNCED_HTML} email(s) rejeté(s)"
       [[ "$DEFERRED_HTML" -gt 0 ]] && add_html_check warn "${DEFERRED_HTML} email(s) différé(s)"
       [[ "$SENT_HTML" -gt 0 ]] && add_html_check ok "${SENT_HTML} email(s) envoyé(s)"
@@ -4157,7 +3972,7 @@ PROGHTML
   fi
 
   # Zombies
-  ZOMBIES_HTML=$(ps aux 2>/dev/null | grep -c ' Z ' || echo 0)
+  ZOMBIES_HTML=$(ps aux 2>/dev/null | grep -c ' Z ') || ZOMBIES_HTML=0
   ZOMBIES_HTML=$((ZOMBIES_HTML > 0 ? ZOMBIES_HTML - 1 : 0))
   [[ "$ZOMBIES_HTML" -eq 0 ]] && add_html_check ok "Processus zombies : 0" || add_html_check warn "Processus zombies : ${ZOMBIES_HTML}"
   add_html_check ok "Uptime : $(uptime -p | sed 's/up //')"
