@@ -58,15 +58,53 @@ note()    { printf "${CYAN}[-]${RESET} %b\n" "$*"; }
 section() { printf "\n${BOLD}${MAGENTA}==> %b${RESET}\n" "$*"; }
 die()     { err "$1"; exit 1; }
 
-trap 'err "Erreur à la ligne $LINENO. Consulte le journal si nécessaire."' ERR
-
 # ---------------------------------- Constantes (chemins, seuils, versions) -----------
+# Espace disque & versions
 readonly MIN_DISK_KB=2097152          # 2 Go minimum d'espace libre
 readonly NVM_VERSION="v0.40.1"
-readonly PMA_ALIAS_LENGTH=12          # Longueur du suffixe aléatoire phpMyAdmin
+readonly DKIM_KEY_BITS=2048
+readonly CONFIG_VERSION=2
+
+# Timeouts (secondes)
+readonly CURL_TIMEOUT=5
+readonly DNS_TIMEOUT=3
+readonly CURL_TIMEOUT_SHORT=2
+readonly PING_TIMEOUT=2
+
+# Seuils de rétention (jours)
 readonly CLAMAV_LOG_RETENTION_DAYS=180
 readonly RKHUNTER_LOG_RETENTION_DAYS=30
 readonly AIDE_LOG_RETENTION_DAYS=30
+readonly SSL_WARN_DAYS=30
+readonly DB_FRESH_DAYS=7
+readonly DB_STALE_DAYS=30
+
+# Seuils système
+readonly LOG_SIZE_WARN_MB=1000
+readonly LOG_SIZE_FAIL_MB=5000
+
+# Cron schedules
+readonly CRON_CLAMAV="0 2 * * *"              # quotidien 2h00
+readonly CRON_RKHUNTER="0 3 * * 0"            # hebdo dimanche 3h00
+readonly CRON_AIDE="0 4 * * *"                # quotidien 4h00
+readonly CRON_UPDATES="0 7 * * 1"             # hebdo lundi 7h00
+readonly CRON_AUDIT="0 7 * * 1"               # hebdo lundi 7h00
+
+# Réseau
+readonly OPENDKIM_PORT=8891
+readonly PMA_ALIAS_HEX_LENGTH=4
+readonly PMA_COOKIE_VALIDITY=1800             # 30 minutes
+
+# GeoIP — listes de pays (Afrique 54 + Asie 49 = 103)
+readonly GEOIP_COUNTRIES_AFRICA="dz ao bj bw bf bi cv cm cf td km cg cd ci dj eg gq er sz et ga gm gh gn gw ke ls lr ly mg mw ml mr mu ma mz na ne ng rw st sn sc sl so za ss sd tz tg tn ug zm zw"
+readonly GEOIP_COUNTRIES_ASIA="af am az bh bd bt bn kh cn ge in id ir iq il jo kz kw kg la lb my mv mn mm np kp om pk ps ph qa ru sa sg kr lk sy tw tj th tl tr tm ae uz vn ye"
+readonly GEOIP_COUNTRY_COUNT=103
+
+# Couleurs HTML (charte Since & Co)
+readonly HTML_COLOR_DARK="#142136"
+readonly HTML_COLOR_ACCENT="#dc5c3b"
+readonly HTML_COLOR_CYAN="#6bdbdb"
+readonly HTML_COLOR_GREEN="#99c454"
 
 # ---------------------------------- Valeurs par défaut -------------------------------
 HOSTNAME_FQDN_DEFAULT="example.com"
@@ -214,13 +252,13 @@ preflight_checks() {
   fi
 
   # Connectivité réseau
-  if ! curl -sf --max-time 5 https://deb.debian.org/ >/dev/null 2>&1; then
+  if ! curl -sf --max-time "$CURL_TIMEOUT" https://deb.debian.org/ >/dev/null 2>&1; then
     err "Pas de connectivité vers les dépôts Debian (https://deb.debian.org/)"
     ((errors++))
   fi
 
   # Résolution DNS
-  if ! host -W 3 deb.debian.org >/dev/null 2>&1; then
+  if ! host -W "$DNS_TIMEOUT" deb.debian.org >/dev/null 2>&1; then
     warn "Résolution DNS lente ou absente — vérifiez /etc/resolv.conf"
   fi
 
@@ -268,6 +306,7 @@ prompt_yes_no() {
 save_config() {
   cat >"$CONFIG_FILE" <<CONF
 # Configuration générée le $(date '+%Y-%m-%d %H:%M:%S')
+CONFIG_VERSION=${CONFIG_VERSION}
 HOSTNAME_FQDN="${HOSTNAME_FQDN}"
 SSH_PORT="${SSH_PORT}"
 ADMIN_USER="${ADMIN_USER}"
@@ -319,6 +358,11 @@ load_config() {
     # shellcheck disable=SC1090
     source "$CONFIG_FILE"
     set -u
+    # Vérifier la version du fichier de config
+    local file_version="${CONFIG_VERSION:-1}"
+    if (( file_version < CONFIG_VERSION )); then
+      warn "Fichier de config version ${file_version}, version courante ${CONFIG_VERSION}. Migration automatique."
+    fi
     return 0
   fi
   return 1
@@ -606,11 +650,31 @@ else
   fi
 fi
 
-# Chemins/constantes dérivées
-DKIM_KEYDIR="/etc/opendkim/keys/${DKIM_DOMAIN}"
-LOG_FILE="/var/log/bootstrap_ovh_debian13.log"
+# Chemins/constantes dérivées (readonly après affectation)
+readonly DKIM_KEYDIR="/etc/opendkim/keys/${DKIM_DOMAIN}"
+readonly LOG_FILE="/var/log/bootstrap_ovh_debian13.log"
 DEBIAN_FRONTEND=noninteractive
 export DEBIAN_FRONTEND
+
+# ---------------------------------- Fichiers temporaires & cleanup (#17, #18) ---------
+declare -a _TMPFILES=()
+
+# Crée un fichier temporaire sécurisé et l'enregistre pour le cleanup
+mktempfile() {
+  local suffix="${1:-.tmp}"
+  local f
+  f=$(mktemp --tmpdir "bootstrap-XXXXXX${suffix}")
+  _TMPFILES+=("$f")
+  echo "$f"
+}
+
+# Nettoyage automatique des fichiers temporaires à la sortie
+cleanup_tmpfiles() {
+  for f in "${_TMPFILES[@]:-}"; do
+    [[ -f "$f" ]] && rm -f "$f"
+  done
+}
+trap 'cleanup_tmpfiles; err "Erreur à la ligne $LINENO. Consulte le journal si nécessaire."' ERR EXIT
 
 # ---------------------------------- Utilitaires ---------------------------------------
 backup_file() {
@@ -652,11 +716,188 @@ get_user_home() {
   fi
 }
 
+# (#11, #16) Installe des paquets avec retry et logging
+apt_install() {
+  local retries=2 attempt=1
+  while (( attempt <= retries )); do
+    if apt-get install -y "$@" 2>&1 | tee -a "$LOG_FILE"; then
+      return 0
+    fi
+    warn "apt-get install échoué (tentative ${attempt}/${retries}), nouvel essai après apt-get update..."
+    apt-get update -y >> "$LOG_FILE" 2>&1
+    ((attempt++))
+  done
+  err "Échec d'installation de : $*"
+  return 1
+}
+
 apt_update_upgrade() {
   section "Mises à jour APT"
   apt-get update -y | tee -a "$LOG_FILE"
   apt-get full-upgrade -y | tee -a "$LOG_FILE"
-  apt-get install -y apt-transport-https ca-certificates gnupg lsb-release | tee -a "$LOG_FILE"
+  apt_install apt-transport-https ca-certificates gnupg lsb-release
+}
+
+# (#1) Gestion idempotente des cron jobs
+# Usage: add_cron_job <grep_pattern> <cron_line> [comment]
+add_cron_job() {
+  local pattern="$1" line="$2" comment="${3:-}"
+  local current new
+  current=$(crontab -l 2>/dev/null || true)
+  new=$(echo "$current" | grep -v "$pattern" || true)
+  if [[ -n "$comment" ]]; then
+    echo -e "${new}\n# ${comment}\n${line}" | grep -v '^$' | crontab -
+  else
+    echo -e "${new}\n${line}" | grep -v '^$' | crontab -
+  fi
+}
+
+# (#2) Déploie un script de monitoring (écriture + email + chmod + cron optionnel)
+# Usage: deploy_script <path> <content> [cron_schedule] [cron_comment]
+deploy_script() {
+  local path="$1" content="$2" cron_schedule="${3:-}" cron_comment="${4:-}"
+  local dir
+  dir="$(dirname "$path")"
+  mkdir -p "$dir"
+
+  echo "$content" > "$path"
+  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" "$path"
+  chmod +x "$path"
+
+  if [[ -n "$cron_schedule" ]]; then
+    local cron_line="${cron_schedule} ${path} >/dev/null 2>&1"
+    local script_name
+    script_name="$(basename "$path")"
+    add_cron_job "$script_name" "$cron_line" "$cron_comment"
+  fi
+}
+
+# (#5) Vérifie si un service est actif (pour CLI et HTML)
+# Usage: check_service_active <service_name> <label> [mode: cli|html]
+check_service_active() {
+  local service="$1" label="$2" mode="${3:-cli}"
+  if systemctl is-active --quiet "$service"; then
+    if [[ "$mode" == "html" ]]; then
+      add_html_check ok "${label} : actif"
+    else
+      check_ok "${label} : actif"
+    fi
+    return 0
+  else
+    if [[ "$mode" == "html" ]]; then
+      add_html_check warn "${label} : inactif"
+    else
+      check_fail "${label} : inactif"
+    fi
+    return 1
+  fi
+}
+
+# (#6) Vérifie la fraîcheur d'une base de données (ClamAV, rkhunter, AIDE)
+# Usage: check_db_freshness <file_or_dir> <label> <fresh_days> <stale_days> [mode: cli|html]
+check_db_freshness() {
+  local target="$1" label="$2" fresh="${3:-$DB_FRESH_DAYS}" stale="${4:-$DB_STALE_DAYS}" mode="${5:-cli}"
+  local db_epoch age_days
+
+  # Obtenir le timestamp de la cible
+  if [[ -d "$target" ]]; then
+    db_epoch=$(find "$target" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
+  elif [[ -f "$target" ]]; then
+    db_epoch=$(stat -c %Y "$target" 2>/dev/null)
+  else
+    if [[ "$mode" == "html" ]]; then
+      add_html_check warn "${label} : base non trouvée"
+    else
+      check_warn "${label} : base non trouvée"
+    fi
+    return 1
+  fi
+
+  [[ -z "$db_epoch" ]] && return 1
+  db_epoch=${db_epoch%.*}  # Supprime la partie décimale éventuelle
+  age_days=$(( ($(date +%s) - db_epoch) / 86400 ))
+
+  local status msg
+  if (( age_days <= fresh )); then
+    status="ok"; msg="${label} : base à jour (${age_days} jour(s))"
+  elif (( age_days <= stale )); then
+    status="warn"; msg="${label} : base date de ${age_days} jours"
+  else
+    status="fail"; msg="${label} : base obsolète (${age_days} jours)"
+  fi
+
+  if [[ "$mode" == "html" ]]; then
+    add_html_check "$status" "$msg"
+  else
+    case "$status" in
+      ok)   check_ok "$msg" ;;
+      warn) check_warn "$msg" ;;
+      fail) check_fail "$msg" ;;
+    esac
+  fi
+}
+
+# ================================== MODULES D'INSTALLATION ============================
+# Chaque module est une fonction install_<nom>() suivant le principe SRP (Single Responsibility)
+#
+# Registre déclaratif des modules (#8 — Open/Closed Principle) :
+#   FLAG                  → FONCTION / SECTION
+#   INSTALL_LOCALES       → install_locales()
+#   (toujours)            → install_hostname()
+#   INSTALL_SSH_HARDEN    → section 2) SSH durci
+#   INSTALL_UFW           → section 3) UFW + 3b) GeoIP
+#   INSTALL_FAIL2BAN      → section 4) Fail2ban
+#   INSTALL_APACHE_PHP    → section 5) Apache/PHP + pages d'erreur
+#   INSTALL_MARIADB       → section 6) MariaDB
+#   INSTALL_PHPMYADMIN    → section 6b) phpMyAdmin
+#   INSTALL_POSTFIX_DKIM  → section 7) Postfix + OpenDKIM
+#   INSTALL_CERTBOT       → section 8) Certbot
+#   INSTALL_DEVTOOLS      → section 9) Dev tools
+#   INSTALL_NODE          → section 10) Node (nvm)
+#   INSTALL_RUST          → section 11) Rust
+#   INSTALL_PYTHON3       → section 11b) Python 3
+#   INSTALL_COMPOSER      → section 12) Composer
+#   INSTALL_SYMFONY       → section 12b) Symfony CLI
+#   INSTALL_SHELL_FUN     → section 13) Shell fun
+#   INSTALL_CLAMAV        → section 14) ClamAV
+#   INSTALL_RKHUNTER      → section 14b) rkhunter
+#   INSTALL_LOGWATCH      → section 14c) Logwatch
+#   INSTALL_SSH_ALERT     → section 14d) SSH Alert
+#   INSTALL_AIDE          → section 14e) AIDE
+#   INSTALL_MODSEC_CRS    → section 14f) ModSecurity CRS
+#   SECURE_TMP            → section 14g) Secure /tmp
+#   INSTALL_BASHRC_GLOBAL → section 16) .bashrc global
+#
+# Pour ajouter un nouveau module :
+#   1. Ajouter le flag INSTALL_XXX dans save_config/ask_all_questions
+#   2. Créer la fonction install_xxx() ou le bloc if $INSTALL_XXX
+#   3. Ajouter la vérification dans la section VÉRIFICATIONS
+#   4. Mettre à jour ce registre
+
+install_locales() {
+  section "Locales fr_FR"
+  apt_install locales tzdata
+  sed -i 's/^# *fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen
+  grep -q '^fr_FR ISO-8859-1' /etc/locale.gen || echo 'fr_FR ISO-8859-1' >> /etc/locale.gen
+  grep -q '^fr_FR@euro ISO-8859-15' /etc/locale.gen || echo 'fr_FR@euro ISO-8859-15' >> /etc/locale.gen
+  locale-gen | tee -a "$LOG_FILE"
+  update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr LC_TIME=fr_FR.UTF-8 LC_NUMERIC=fr_FR.UTF-8 LC_MONETARY=fr_FR.UTF-8 LC_PAPER=fr_FR.UTF-8 LC_MEASUREMENT=fr_FR.UTF-8
+  timedatectl set-timezone "$TIMEZONE" || true
+  log "Locales fr_FR et timezone configurées."
+}
+
+install_hostname() {
+  section "Hostname & /etc/hosts"
+  hostnamectl set-hostname "$HOSTNAME_FQDN"
+  if ! grep -q "$HOSTNAME_FQDN" /etc/hosts; then
+    backup_file /etc/hosts
+    IP4=$(hostname -I | awk '{print $1}')
+    {
+      echo "127.0.0.1   localhost"
+      echo "${IP4}   ${HOSTNAME_FQDN} ${HOSTNAME_FQDN%%.*}"
+    } > /etc/hosts
+  fi
+  log "Hostname défini sur ${HOSTNAME_FQDN}"
 }
 
 # ================================== INSTALLATION ======================================
@@ -665,36 +906,15 @@ if ! $AUDIT_MODE; then
 
 # ---------------------------------- 0) APT & locales ----------------------------------
 apt_update_upgrade
-
-if $INSTALL_LOCALES; then
-  section "Locales fr_FR"
-  apt-get install -y locales tzdata | tee -a "$LOG_FILE"
-  sed -i 's/^# *fr_FR.UTF-8 UTF-8/fr_FR.UTF-8 UTF-8/' /etc/locale.gen
-  grep -q '^fr_FR ISO-8859-1' /etc/locale.gen || echo 'fr_FR ISO-8859-1' >> /etc/locale.gen
-  grep -q '^fr_FR@euro ISO-8859-15' /etc/locale.gen || echo 'fr_FR@euro ISO-8859-15' >> /etc/locale.gen
-  locale-gen | tee -a "$LOG_FILE"
-  update-locale LANG=fr_FR.UTF-8 LANGUAGE=fr_FR:fr LC_TIME=fr_FR.UTF-8 LC_NUMERIC=fr_FR.UTF-8 LC_MONETARY=fr_FR.UTF-8 LC_PAPER=fr_FR.UTF-8 LC_MEASUREMENT=fr_FR.UTF-8
-  timedatectl set-timezone "$TIMEZONE" || true
-  log "Locales fr_FR et timezone configurées."
-fi
+$INSTALL_LOCALES && install_locales
 
 # ---------------------------------- 1) Hostname/hosts ---------------------------------
-section "Hostname & /etc/hosts"
-hostnamectl set-hostname "$HOSTNAME_FQDN"
-if ! grep -q "$HOSTNAME_FQDN" /etc/hosts; then
-  backup_file /etc/hosts
-  IP4=$(hostname -I | awk '{print $1}')
-  {
-    echo "127.0.0.1   localhost"
-    echo "${IP4}   ${HOSTNAME_FQDN} ${HOSTNAME_FQDN%%.*}"
-  } > /etc/hosts
-fi
-log "Hostname défini sur ${HOSTNAME_FQDN}"
+install_hostname
 
 # ---------------------------------- 2) SSH durci --------------------------------------
 if $INSTALL_SSH_HARDEN; then
   section "SSH durci (clé uniquement) + port ${SSH_PORT}"
-  apt-get install -y openssh-server | tee -a "$LOG_FILE"
+  apt_install openssh-server
   backup_file /etc/ssh/sshd_config
   cat >/etc/ssh/sshd_config <<EOF
 Include /etc/ssh/sshd_config.d/*.conf
@@ -729,7 +949,7 @@ fi
 # ---------------------------------- 3) UFW --------------------------------------------
 if $INSTALL_UFW; then
   section "Pare-feu UFW"
-  apt-get install -y ufw | tee -a "$LOG_FILE"
+  apt_install ufw
   ufw default deny incoming
   ufw default allow outgoing
   ufw allow "${SSH_PORT}/tcp" comment "SSH"
@@ -742,8 +962,8 @@ fi
 
 # ---------------------------------- 3b) GeoIP Block ------------------------------------
 if $GEOIP_BLOCK && $INSTALL_UFW; then
-  section "Blocage GeoIP (103 pays : Asie + Afrique)"
-  apt-get install -y ipset | tee -a "$LOG_FILE"
+  section "Blocage GeoIP (${GEOIP_COUNTRY_COUNT} pays : Asie + Afrique)"
+  apt_install ipset
 
   # Créer l'ipset s'il n'existe pas
   ipset list geoip_blocked >/dev/null 2>&1 || ipset create geoip_blocked hash:net
@@ -809,7 +1029,7 @@ fi
 # ---------------------------------- 4) Fail2ban ---------------------------------------
 if $INSTALL_FAIL2BAN; then
   section "Fail2ban"
-  apt-get install -y fail2ban | tee -a "$LOG_FILE"
+  apt_install fail2ban
   backup_file /etc/fail2ban/jail.local
 
   # Construire la liste des IPs à ignorer
@@ -904,10 +1124,10 @@ fi
 # ---------------------------------- 5) Apache/PHP -------------------------------------
 if $INSTALL_APACHE_PHP; then
   section "Apache + PHP"
-  apt-get install -y apache2 apache2-utils | tee -a "$LOG_FILE"
+  apt_install apache2 apache2-utils
   systemctl enable --now apache2
-  apt-get install -y php php-cli php-fpm php-mysql php-curl php-xml php-gd php-mbstring php-zip php-intl php-opcache php-imagick imagemagick libapache2-mod-php | tee -a "$LOG_FILE"
-  apt-get install -y libapache2-mod-security2 libapache2-mod-evasive | tee -a "$LOG_FILE"
+  apt_install php php-cli php-fpm php-mysql php-curl php-xml php-gd php-mbstring php-zip php-intl php-opcache php-imagick imagemagick libapache2-mod-php
+  apt_install libapache2-mod-security2 libapache2-mod-evasive
 
   # Activer les modules Apache utiles
   a2enmod headers rewrite ssl security2  # Sécurité & réécriture
@@ -1297,7 +1517,7 @@ fi
 # ---------------------------------- 6) MariaDB ----------------------------------------
 if $INSTALL_MARIADB; then
   section "MariaDB"
-  apt-get install -y mariadb-server mariadb-client | tee -a "$LOG_FILE"
+  apt_install mariadb-server mariadb-client
   systemctl enable --now mariadb
   mysql --user=root <<'SQL'
 DELETE FROM mysql.user WHERE User='';
@@ -1322,7 +1542,7 @@ if $INSTALL_PHPMYADMIN; then
     echo "phpmyadmin phpmyadmin/mysql/app-pass password" | debconf-set-selections
     echo "phpmyadmin phpmyadmin/reconfigure-webserver multiselect apache2" | debconf-set-selections
 
-    apt-get install -y phpmyadmin | tee -a "$LOG_FILE"
+    apt_install phpmyadmin
 
     # Activer la configuration Apache si pas déjà fait
     if [[ -f /etc/phpmyadmin/apache.conf ]] && [[ ! -L /etc/apache2/conf-enabled/phpmyadmin.conf ]]; then
@@ -1330,7 +1550,7 @@ if $INSTALL_PHPMYADMIN; then
     fi
 
     # Sécurisation : changer l'URL par défaut (évite les scans automatiques)
-    PMA_ALIAS="dbadmin_$(openssl rand -hex 4)"
+    PMA_ALIAS="dbadmin_$(openssl rand -hex "$PMA_ALIAS_HEX_LENGTH")"
     backup_file /etc/phpmyadmin/apache.conf
     if [[ -f /etc/phpmyadmin/apache.conf ]]; then
       sed -i "s|Alias /phpmyadmin|Alias /${PMA_ALIAS}|g" /etc/phpmyadmin/apache.conf
@@ -1341,7 +1561,7 @@ if $INSTALL_PHPMYADMIN; then
     cat >/etc/phpmyadmin/conf.d/security.php <<'PMASEC'
 <?php
 // Sécurité supplémentaire phpMyAdmin
-$cfg['LoginCookieValidity'] = 1800;  // 30 minutes
+$cfg['LoginCookieValidity'] = __PMA_COOKIE_VALIDITY__;  // 30 minutes
 $cfg['LoginCookieStore'] = 0;
 $cfg['AuthLog'] = 'syslog';
 $cfg['CaptchaLoginPublicKey'] = '';
@@ -1351,6 +1571,7 @@ $cfg['ShowServerInfo'] = false;
 $cfg['ShowPhpInfo'] = false;
 $cfg['ShowChgPassword'] = true;
 PMASEC
+    sed -i "s|__PMA_COOKIE_VALIDITY__|${PMA_COOKIE_VALIDITY}|g" /etc/phpmyadmin/conf.d/security.php
 
     # Inclure le fichier de sécurité dans la config principale
     if ! grep -q "conf.d/security.php" /etc/phpmyadmin/config.inc.php 2>/dev/null; then
@@ -1373,7 +1594,7 @@ if $INSTALL_POSTFIX_DKIM; then
   section "Postfix (send-only) + OpenDKIM"
   echo "postfix postfix/mailname string ${DKIM_DOMAIN}" | debconf-set-selections
   echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
-  apt-get install -y postfix opendkim opendkim-tools | tee -a "$LOG_FILE"
+  apt_install postfix opendkim opendkim-tools
 
   backup_file /etc/postfix/main.cf
   postconf -e "myhostname=${HOSTNAME_FQDN}"
@@ -1405,7 +1626,7 @@ if $INSTALL_POSTFIX_DKIM; then
     # Supprimer les fichiers partiels s'ils existent
     rm -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null || true
     # Générer la clé
-    if opendkim-genkey -s "${DKIM_SELECTOR}" -d "${DKIM_DOMAIN}" -b 2048 -r -D "${DKIM_KEYDIR}"; then
+    if opendkim-genkey -s "${DKIM_SELECTOR}" -d "${DKIM_DOMAIN}" -b "${DKIM_KEY_BITS}" -r -D "${DKIM_KEYDIR}"; then
       chown opendkim:opendkim "${DKIM_KEYDIR}/${DKIM_SELECTOR}.private"
       chmod 600 "${DKIM_KEYDIR}/${DKIM_SELECTOR}.private"
       chmod 644 "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
@@ -1431,7 +1652,7 @@ Syslog                  yes
 LogWhy                  yes
 UMask                   007
 Mode                    sv
-Socket                  inet:8891@localhost
+Socket                  inet:${OPENDKIM_PORT}@localhost
 PidFile                 /run/opendkim/opendkim.pid
 UserID                  opendkim:opendkim
 Canonicalization        relaxed/simple
@@ -1463,8 +1684,8 @@ EOF
   # Ces paramètres Postfix peuvent être réappliqués sans risque
   postconf -e "milter_default_action=accept"
   postconf -e "milter_protocol=6"
-  postconf -e "smtpd_milters=inet:localhost:8891"
-  postconf -e "non_smtpd_milters=inet:localhost:8891"
+  postconf -e "smtpd_milters=inet:localhost:${OPENDKIM_PORT}"
+  postconf -e "non_smtpd_milters=inet:localhost:${OPENDKIM_PORT}"
 
   systemctl enable --now opendkim
   systemctl restart postfix
@@ -1474,7 +1695,7 @@ fi
 # ---------------------------------- 8) Certbot ----------------------------------------
 if $INSTALL_CERTBOT; then
   section "Certbot (Let's Encrypt)"
-  apt-get install -y certbot python3-certbot-apache | tee -a "$LOG_FILE"
+  apt_install certbot python3-certbot-apache
   note "Demande manuelle du certificat quand DNS OK:"
   note "  certbot --apache -d ${HOSTNAME_FQDN} -d www.${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
 fi
@@ -1482,7 +1703,7 @@ fi
 # ---------------------------------- 9) Dev tools --------------------------------------
 if $INSTALL_DEVTOOLS; then
   section "Outils dev (Git/Curl/build-essential/grc)"
-  apt-get install -y git curl build-essential pkg-config dnsutils grc | tee -a "$LOG_FILE"
+  apt_install git curl build-essential pkg-config dnsutils grc
 fi
 
 # ---------------------------------- 10) Node (nvm) ------------------------------------
@@ -1491,7 +1712,7 @@ if $INSTALL_NODE; then
   USER_HOME="$(get_user_home)"
 
   # Installation de nvm pour l'utilisateur admin (download then execute)
-  NVM_INSTALLER="/tmp/nvm-install-$$.sh"
+  NVM_INSTALLER="$(mktempfile .sh)"
   curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" -o "$NVM_INSTALLER"
   run_as_user "
     export NVM_DIR=\"${USER_HOME}/.nvm\"
@@ -1523,7 +1744,7 @@ if $INSTALL_RUST; then
 
   # Vérifie si rustup est déjà installé pour l'utilisateur
   if ! sudo -u "$ADMIN_USER" -H bash -c "command -v rustup" >/dev/null 2>&1; then
-    RUSTUP_INSTALLER="/tmp/rustup-init-$$.sh"
+    RUSTUP_INSTALLER="$(mktempfile .sh)"
     curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUSTUP_INSTALLER"
     run_as_user "
       bash \"$RUSTUP_INSTALLER\" -y --default-toolchain stable
@@ -1545,7 +1766,7 @@ if $INSTALL_PYTHON3; then
   section "Python 3 + pip + venv + pipx"
 
   # Installation des paquets Python (pipx via apt pour respecter PEP 668)
-  apt-get install -y python3 python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-full pipx
+  apt_install python3 python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-full pipx
 
   USER_HOME="$(get_user_home)"
 
@@ -1574,7 +1795,7 @@ if $INSTALL_COMPOSER; then
   run_as_user "mkdir -p ${USER_HOME}/.local/bin"
 
   # Télécharge et installe Composer pour l'utilisateur (download then execute)
-  COMPOSER_INSTALLER="/tmp/composer-setup-$$.php"
+  COMPOSER_INSTALLER="$(mktempfile .php)"
   curl -fsSL https://getcomposer.org/installer -o "$COMPOSER_INSTALLER"
   # Vérification du hash (optionnel mais recommandé)
   EXPECTED_SIG="$(curl -fsSL https://composer.github.io/installer.sig 2>/dev/null || true)"
@@ -1609,40 +1830,22 @@ if $INSTALL_SYMFONY; then
   # Extensions PHP supplémentaires pour Symfony
   # (les extensions de base sont déjà dans la section Apache/PHP)
   # Note: sodium est inclus dans PHP 8.x core
-  apt-get install -y \
-    php-apcu \
-    php-sqlite3 \
-    php-bcmath \
-    php-redis \
-    php-amqp \
-    php-yaml \
-    | tee -a "$LOG_FILE"
+  apt_install php-apcu php-sqlite3 php-bcmath php-redis php-amqp php-yaml
 
   # Redémarrer PHP-FPM pour charger les nouvelles extensions
   systemctl restart php*-fpm 2>/dev/null || true
 
   # Dépendances pour Chrome Headless (génération PDF avec Browsershot/Puppeteer)
   # + Ghostscript pour manipulation PDF
-  apt-get install -y \
-    libxcomposite1 \
-    libatk-bridge2.0-0t64 \
-    libatk1.0-0t64 \
-    libnss3 \
-    libxdamage1 \
-    libxfixes3 \
-    libxrandr2 \
-    libgbm1 \
-    libxkbcommon0 \
-    libasound2t64 \
-    ghostscript \
-    | tee -a "$LOG_FILE"
+  apt_install libxcomposite1 libatk-bridge2.0-0t64 libatk1.0-0t64 libnss3 \
+    libxdamage1 libxfixes3 libxrandr2 libgbm1 libxkbcommon0 libasound2t64 ghostscript
 
   # Installer Symfony CLI (download then execute)
-  SYMFONY_REPO_SETUP="/tmp/symfony-repo-setup-$$.sh"
+  SYMFONY_REPO_SETUP="$(mktempfile .sh)"
   curl -1sLf 'https://dl.cloudsmith.io/public/symfony/stable/setup.deb.sh' -o "$SYMFONY_REPO_SETUP"
   bash "$SYMFONY_REPO_SETUP"
   rm -f "$SYMFONY_REPO_SETUP"
-  apt-get install -y symfony-cli | tee -a "$LOG_FILE"
+  apt_install symfony-cli
 
   # Vérifier l'installation
   symfony version || true
@@ -1653,7 +1856,7 @@ fi
 if $INSTALL_SHELL_FUN; then
   section "Confort shell (fastfetch, toilet, fortune-mod, cowsay, lolcat, grc, archives, beep)"
   # fastfetch remplace neofetch (abandonné), unrar-free remplace unrar (non-free)
-  apt-get install -y fastfetch toilet figlet fortune-mod cowsay lolcat grc p7zip-full zip unzip beep 2>&1 | tee -a "$LOG_FILE" || true
+  apt_install fastfetch toilet figlet fortune-mod cowsay lolcat grc p7zip-full zip unzip beep || true
   # unrar-free en fallback (peut ne pas être dispo)
   apt-get install -y unrar-free 2>/dev/null || true
   # fallback lolcat via pip si paquet non dispo
@@ -1669,7 +1872,7 @@ fi
 # ---------------------------------- 14) ClamAV ----------------------------------------
 if $INSTALL_CLAMAV; then
   section "ClamAV"
-  apt-get install -y clamav clamav-daemon mailutils cron | tee -a "$LOG_FILE"
+  apt_install clamav clamav-daemon mailutils cron
   systemctl enable --now cron || true
   systemctl stop clamav-freshclam || true
   freshclam || true
@@ -1789,18 +1992,15 @@ mkdir -p "$MONTH_DIR"
 mv "$LOG_FILE" "$MONTH_DIR/"
 
 # Nettoyage des logs > 6 mois
-find "$LOG_DIR" -type d -mtime +180 -exec rm -rf {} \; 2>/dev/null || true
+find "$LOG_DIR" -type d -mtime +__CLAMAV_RETENTION__ -exec rm -rf {} \; 2>/dev/null || true
 CLAMAVSCAN
 
   # Remplacer l'email par celui configuré
-  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/clamav_scan.sh
+  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g; s|__CLAMAV_RETENTION__|${CLAMAV_LOG_RETENTION_DAYS}|g" /root/scripts/clamav_scan.sh
   chmod +x /root/scripts/clamav_scan.sh
 
-  # Ajouter le cron job (tous les jours à 2h00)
-  CRON_LINE="0 2 * * * /root/scripts/clamav_scan.sh >/dev/null 2>&1"
-  CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-  NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "clamav_scan.sh" || true)
-  echo -e "${NEW_CRON}\n${CRON_LINE}" | grep -v '^$' | crontab -
+  # Ajouter le cron job (quotidien)
+  add_cron_job "clamav_scan.sh" "${CRON_CLAMAV} /root/scripts/clamav_scan.sh >/dev/null 2>&1" "ClamAV scan quotidien"
 
   log "ClamAV opérationnel (signatures à jour si freshclam OK)."
   log "Script de scan quotidien : /root/scripts/clamav_scan.sh"
@@ -1810,7 +2010,7 @@ fi
 # ---------------------------------- 14b) rkhunter -------------------------------------
 if $INSTALL_RKHUNTER; then
   section "rkhunter (détection rootkits)"
-  apt-get install -y rkhunter | tee -a "$LOG_FILE"
+  apt_install rkhunter
 
   # Configuration /etc/default/rkhunter
   backup_file /etc/rkhunter.conf
@@ -1873,17 +2073,13 @@ if grep -qE "(Warning|Infected)" "$LOGFILE"; then
 fi
 
 # Nettoyage logs > 30 jours
-find /var/log -name "rkhunter_scan_*.log" -mtime +30 -delete 2>/dev/null || true
+find /var/log -name "rkhunter_scan_*.log" -mtime +__RKHUNTER_RETENTION__ -delete 2>/dev/null || true
 RKHUNTERSCAN
 
-  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/rkhunter_scan.sh
+  # Déployer le script + cron (deploy_script gère sed __EMAIL__, chmod, et cron)
+  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g; s|__RKHUNTER_RETENTION__|${RKHUNTER_LOG_RETENTION_DAYS}|g" /root/scripts/rkhunter_scan.sh
   chmod +x /root/scripts/rkhunter_scan.sh
-
-  # Cron hebdomadaire (dimanche 3h00) — idempotent
-  CRON_LINE="0 3 * * 0 /root/scripts/rkhunter_scan.sh >/dev/null 2>&1"
-  CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-  NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "rkhunter_scan" || true)
-  echo -e "${NEW_CRON}\n# rkhunter scan hebdomadaire (dimanche 3h00)\n${CRON_LINE}" | grep -v '^$' | crontab -
+  add_cron_job "rkhunter_scan" "${CRON_RKHUNTER} /root/scripts/rkhunter_scan.sh >/dev/null 2>&1" "rkhunter scan hebdomadaire (dimanche 3h00)"
 
   log "rkhunter installé et configuré (scan hebdomadaire dimanche 3h00)"
 fi
@@ -1891,7 +2087,7 @@ fi
 # ---------------------------------- 14c) Logwatch -------------------------------------
 if $INSTALL_LOGWATCH; then
   section "Logwatch (résumé quotidien des logs)"
-  apt-get install -y logwatch | tee -a "$LOG_FILE"
+  apt_install logwatch
 
   # Configuration personnalisée
   mkdir -p /etc/logwatch/conf
@@ -1969,7 +2165,7 @@ fi
 # ---------------------------------- 14e) AIDE ------------------------------------------
 if $INSTALL_AIDE; then
   section "AIDE (détection modifications fichiers)"
-  apt-get install -y aide | tee -a "$LOG_FILE"
+  apt_install aide
 
   # Configuration personnalisée (exclure les fichiers qui changent souvent)
   cat >/etc/aide/aide.conf.d/99_local_excludes <<'AIDECONF'
@@ -2038,17 +2234,14 @@ if [ $RESULT -ne 0 ]; then
 fi
 
 # Nettoyage logs > 30 jours
-find /var/log/aide -name "aide_check_*.log" -mtime +30 -delete 2>/dev/null || true
+find /var/log/aide -name "aide_check_*.log" -mtime +__AIDE_RETENTION__ -delete 2>/dev/null || true
 AIDECHECK
 
-  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/aide_check.sh
+  sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g; s|__AIDE_RETENTION__|${AIDE_LOG_RETENTION_DAYS}|g" /root/scripts/aide_check.sh
   chmod +x /root/scripts/aide_check.sh
 
-  # Cron quotidien (4h00) — idempotent
-  CRON_LINE="0 4 * * * /root/scripts/aide_check.sh >/dev/null 2>&1"
-  CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-  NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "aide_check" || true)
-  echo -e "${NEW_CRON}\n# AIDE vérification quotidienne (4h00)\n${CRON_LINE}" | grep -v '^$' | crontab -
+  # Cron quotidien — idempotent
+  add_cron_job "aide_check" "${CRON_AIDE} /root/scripts/aide_check.sh >/dev/null 2>&1" "AIDE vérification quotidienne (4h00)"
 
   log "AIDE installé (vérification quotidienne 4h00, initialisation en cours...)"
 fi
@@ -2058,7 +2251,7 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
   section "ModSecurity OWASP Core Rule Set"
 
   # Installer le CRS
-  apt-get install -y modsecurity-crs | tee -a "$LOG_FILE"
+  apt_install modsecurity-crs
 
   # Activer ModSecurity en mode détection d'abord
   backup_file /etc/modsecurity/modsecurity.conf
@@ -2177,7 +2370,7 @@ sysctl --system | tee -a "$LOG_FILE"
 sed -ri 's|^#?Storage=.*|Storage=persistent|' /etc/systemd/journald.conf
 systemctl restart systemd-journald
 
-apt-get install -y unattended-upgrades | tee -a "$LOG_FILE"
+apt_install unattended-upgrades
 dpkg-reconfigure -f noninteractive unattended-upgrades
 
 # Script de vérification des mises à jour (hebdomadaire)
@@ -2241,10 +2434,7 @@ sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/check-updates.sh
 chmod +x /root/scripts/check-updates.sh
 
 # Cron : lundi à 7h00
-CRON_LINE_UPDATES="0 7 * * 1 /root/scripts/check-updates.sh >/dev/null 2>&1"
-CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "check-updates.sh" || true)
-echo -e "${NEW_CRON}\n${CRON_LINE_UPDATES}" | grep -v '^$' | crontab -
+add_cron_job "check-updates.sh" "${CRON_UPDATES} /root/scripts/check-updates.sh >/dev/null 2>&1" "Vérification mises à jour hebdomadaire (lundi 7h00)"
 
 log "Script check-updates.sh créé : /root/scripts/check-updates.sh"
 log "Cron configuré : lundi à 7h00"
@@ -2252,392 +2442,23 @@ log "Cron configuré : lundi à 7h00"
 # ---------------------------------- 16) .bashrc global -------------------------------
 if $INSTALL_BASHRC_GLOBAL; then
   section "Déploiement .bashrc (tous utilisateurs)"
+
+  # (#21 — KISS) Le template .bashrc est externalisé dans templates/bashrc.template
+  BASHRC_TEMPLATE="${SCRIPT_DIR}/templates/bashrc.template"
+  if [[ ! -f "$BASHRC_TEMPLATE" ]]; then
+    BASHRC_TEMPLATE="/root/scripts/templates/bashrc.template"
+  fi
+  if [[ ! -f "$BASHRC_TEMPLATE" ]]; then
+    warn "Template .bashrc non trouvé. Section ignorée."
+  else
+
   install_bashrc_for() {
     local target="$1"
     [[ -d "$(dirname "$target")" ]] || return 0
     backup_file "$target"
-    cat >"$target" <<'BASHRC'
-# If not running interactively, don't do anything
-case $- in *i*) ;; *) return ;; esac
-
-# --- Locales & editor (cohérent sur serveurs)
-export LANG="${LANG:-fr_FR.UTF-8}"
-export LC_ALL="${LC_ALL:-fr_FR.UTF-8}"
-export EDITOR="${EDITOR:-nano}"
-export VISUAL="${VISUAL:-nano}"
-export PAGER="${PAGER:-less}"
-# Prompt lisible dans less (messages en anglais côté "code")
-export LESS='-R --mouse --ignore-case --LONG-PROMPT --prompt="Less → %f  %lb/%L  (line %l)"'
-# Par prudence, désactive les fonctions risquées de less (! et |).
-export LESSSECURE=1
-
-# --- Defaults sécurité (interactif)
-# Masque par défaut : fichiers non accessibles aux "others"
-umask 027
-# Empêche l'écrasement involontaire avec '>' (utiliser '>|' pour forcer)
-set -o noclobber
-
-# --- Historique : volumineux, horodaté, partagé entre sessions sans flush complet
-export HISTSIZE=50000
-export HISTFILESIZE=100000
-export HISTTIMEFORMAT='%F %T  '
-export HISTCONTROL=ignoreboth:erasedups
-# Ignore les commandes banales dans l'historique (ajoute/retire à ton goût)
-export HISTIGNORE='ls:ll:la:cd:pwd:exit:clear'
-
-# --- Bash options (qualité de vie)
-shopt -s autocd              # 'cd' implicite
-shopt -s cdspell dirspell    # tolérance fautes de frappe sur cd/dirs
-shopt -s checkjobs           # avertit si jobs en arrière-plan à la fermeture
-shopt -s extglob globstar    # globbing avancé + ** récursif
-shopt -s histappend cmdhist  # concatène l'historique + conserve commandes multilignes
-shopt -s checkwinsize        # met à jour LINES/COLUMNS
-# Readline : complétion sympa
-bind 'set completion-ignore-case on'
-bind 'set show-all-if-ambiguous on'
-bind '"\e[Z": menu-complete-backward'
-
-# --- PATH helpers (ajoute sans doublon)
-path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH";; esac; }
-path_append()  { case ":$PATH:" in *":$1:"*) ;; *) PATH="$PATH:$1";; esac; }
-
-# --- PATH & outils (ajoute si présents)
-[[ -d "$HOME/.local/bin" ]] && path_prepend "$HOME/.local/bin"
-[[ -d "$HOME/bin"        ]] && path_prepend "$HOME/bin"
-path_append "/usr/games"
-path_append "/usr/local/games"
-export PATH
-
-# --- Couleurs LS_COLORS (sans réécraser les alias ls)
-if command -v dircolors >/dev/null 2>&1; then
-  if [[ -r "$HOME/.dircolors" ]]; then
-    eval "$(dircolors -b "$HOME/.dircolors")"
-  else
-    eval "$(dircolors -b)"
-  fi
-fi
-
-# --- ls/grep améliorés (eza/lsd si dispo) — défini UNE SEULE FOIS
-if command -v eza >/dev/null 2>&1; then
-  alias ls='eza --group-directories-first --git --icons=auto'
-  alias ll='eza -l --group-directories-first --git --icons=auto'
-  alias la='eza -la --group-directories-first --git --icons=auto'
-elif command -v lsd >/dev/null 2>&1; then
-  alias ls='lsd --group-dirs=first'
-  alias ll='lsd -l --group-dirs=first'
-  alias la='lsd -la --group-dirs=first'
-else
-  alias ls='ls --color=auto --group-directories-first'
-  alias ll='ls -alF --color=auto --group-directories-first'
-  alias la='ls -A --color=auto --group-directories-first'
-fi
-alias grep='grep --color=auto'
-alias fgrep='grep -F --color=auto'
-alias egrep='grep -E --color=auto'
-alias df='df -h'
-alias free='free -h'
-alias folder='du -h --max-depth=1 . | sort -hr'
-# Sécurité douce (n'affecte pas les scripts)
-alias rm='rm -i'
-alias cp='cp -i'
-alias mv='mv -i'
-
-# --- Sudo helpers
-please() { eval sudo "$(fc -ln -1)"; }
-# Espace final volontaire pour permettre l'expansion de l'alias suivant (ex: "pls ll")
-alias pls='sudo '
-alias sano='sudo -E nano'
-
-# --- APT (Debian/Ubuntu) : raccourcis utiles, idempotents
-alias au='sudo apt update'
-alias aug='sudo apt update && sudo apt -y upgrade'
-alias asr='apt search'
-alias ain='sudo apt -y install'
-alias arm='sudo apt -y remove'
-alias apc='sudo apt -y autoremove && sudo apt -y autoclean'
-
-# --- Git : logs lisibles & raccourcis
-alias g='git'
-alias ga='git add'
-alias gb='git branch'
-alias gco='git checkout'
-alias gcob='git checkout -b'
-alias gst='git status -sb'
-alias gl='git log --oneline --decorate --graph --all'
-alias gcm='git commit -m'
-alias gca='git commit -a -m'
-alias gpf='git push --force-with-lease'
-alias gpo='git push origin HEAD'
-alias grhh='git reset --hard HEAD'
-alias gundo='git reset --soft HEAD~1'
-alias gpr='git pull --rebase --autostash'
-
-# Configure le pager Git une seule fois si rien n'est déjà défini
-if command -v git >/dev/null 2>&1; then
-  if command -v delta >/dev/null 2>&1; then
-    git config --global --get core.pager >/dev/null 2>&1 || git config --global core.pager delta
-  elif command -v diff-so-fancy >/dev/null 2>&1; then
-    git config --global --get core.pager >/dev/null 2>&1 || git config --global core.pager "diff-so-fancy | less --tabs=4 -RFX"
-  fi
-fi
-
-# --- Réseaux / IP
-alias myip='curl -s --max-time 2 https://ifconfig.me || dig +short myip.opendns.com @resolver1.opendns.com'
-alias ports='ss -tulpn'
-
-# --- Aliases divers (optionnels si grc/yt-dlp présents)
-if command -v grc >/dev/null 2>&1; then
-  alias tail='grc tail'
-  alias ifconfig='grc ifconfig'
-fi
-if command -v yt-dlp >/dev/null 2>&1; then
-  alias youtubedl="yt-dlp -f 'bestaudio' -o '%(artist)s - %(title)s.%(ext)s'"
-elif command -v youtube-dl >/dev/null 2>&1; then
-  alias youtubedl="youtube-dl -f 'bestaudio' -o '%(artist)s - %(title)s.%(ext)s'"
-fi
-
-# --- Symfony / PHP
-alias s='symfony '
-alias c='symfony console '
-alias fix='vendor/bin/php-cs-fixer fix src/ && vendor/bin/phpstan'
-
-# --- Python venv helpers (plus robuste qu'un chemin codé en dur)
-mkvenv() {
-  local target="${1:-.venv}"
-  python3 -m venv "$target" && . "$target/bin/activate"
-}
-workon() {
-  [[ -d ".venv" ]] && . ".venv/bin/activate" || echo "No .venv found in current directory."
-}
-
-# --- Chargement des alias utilisateur
-[[ -f "$HOME/.bash_aliases" ]] && . "$HOME/.bash_aliases"
-
-# --- Fonctions utilitaires
-
-# man pages colorisées
-man() {
-  env \
-  LESS_TERMCAP_mb=$'\E[01;31m' \
-  LESS_TERMCAP_md=$'\E[01;31m' \
-  LESS_TERMCAP_me=$'\E[0m' \
-  LESS_TERMCAP_se=$'\E[0m' \
-  LESS_TERMCAP_so=$'\E[01;31m' \
-  LESS_TERMCAP_ue=$'\E[0m' \
-  LESS_TERMCAP_us=$'\E[01;32m' \
-  man "$@"
-}
-
-log()   { printf "\e[32m%s\e[0m\n" "$1"; }
-error() { printf "\e[31m%s\e[0m\n" "$1" >&2; }
-
-mkcd () { mkdir -p -- "$1" && cd -- "$1"; }
-
-extract () { # Décompresse selon l'extension
-  local f="$1"
-  [[ -f "$f" ]] || { echo "File not found: $f"; return 1; }
-  case "$f" in
-    *.tar.bz2)   tar xjf "$f"   ;;
-    *.tar.gz)    tar xzf "$f"   ;;
-    *.tar.xz)    tar xJf "$f"   ;;
-    *.tar.zst)   tar --zstd -xvf "$f" ;;
-    *.tar)       tar xf "$f"    ;;
-    *.tbz2)      tar xjf "$f"   ;;
-    *.tgz)       tar xzf "$f"   ;;
-    *.zip)       unzip "$f"     ;;
-    *.rar)       unrar x "$f"   ;;
-    *.7z)        7z x "$f"      ;;
-    *.gz)        gunzip "$f"    ;;
-    *.bz2)       bunzip2 "$f"   ;;
-    *.xz)        unxz "$f"      ;;
-    *)           echo "Unsupported archive format: $f" ; return 2 ;;
-  esac
-}
-
-up () { # Remonte de N répertoires (1 par défaut)
-  local d="" limit="${1:-1}"
-  for ((i=1; i<=limit; i++)); do d+="../"; done
-  cd "$d" || return
-}
-
-timer () { # Chronomètre une commande
-  local start end
-  start=$(date +%s)
-  "$@"
-  end=$(date +%s)
-  echo "⏱  $(( end - start ))s"
-}
-
-# --- Prompt : couleurs + infos utiles, sans casser l'historique
-
-# Helpers couleurs (gèrent le comptage de longueur grâce à \[ \])
-rgb()   { printf "\e[38;2;%s;%s;%sm" "$1" "$2" "$3"; }
-bgrgb() { printf "\e[48;2;%s;%s;%sm" "$1" "$2" "$3"; }
-reset="\[\e[0m\]"
-dim="\[\e[2m\]"
-bold="\[\e[1m\]"
-ul="\[\e[4m\]"
-blue="\[\e[1;34m\]"
-yellow="\[\e[1;33m\]"
-green="\[\e[0;32m\]"
-cyan="\[\e[36m\]"
-magenta="\[\e[35m\]"
-
-_supports_truecolor() { [[ "${COLORTERM:-}" =~ (24bit|truecolor) ]]; }
-
-if _supports_truecolor; then
-  user_fg="\[$(rgb 110 210 65)\]"
-  user_accent="\[$(rgb 200 120 255)\]"
-  kube_fg="\[$(rgb 130 220 200)\]"
-  git_fg="\[$(rgb 255 210 110)\]"
-  time_fg="\[$(rgb 160 170 255)\]"
-  err_bg="\[$(bgrgb 60 0 20)\]\[\e[97m\]"
-  root_fg="\[$(rgb 255 110 110)\]"
-  root_accent="\[$(rgb 255 170 80)\]"
-else
-  user_fg="\[\e[36m\]"
-  user_accent="\[\e[35m\]"
-  kube_fg="\[\e[32m\]"
-  git_fg="\[\e[33m\]"
-  time_fg="\[\e[34m\]"
-  err_bg="\[\e[41m\]\[\e[97m\]"
-  root_fg="\[\e[31m\]"
-  root_accent="\[\e[91m\]"
-fi
-
-sym_branch=""; sym_time=""; sym_kube="󱃾"; sym_venv=""; sym_host=""
-sym_user="";  sym_root="󰌾"; sym_sep=""
-
-# Tirage d'un emoji correct
-emojis=(🐶 🐺 🐱 🐭 🐹 🐰 🐸 🐯 🐨 🐻 🐷 🐮 🐵 🐼 🐧 🐍 🐢 🐙 🐠 🐳 🐬 🐥 💩 👹 👺 💀 👻 👽 🤖 💩 🤯 🤩 😍 🧙‍♀️ 🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐽 🐸 🐵 🙈 🙉 🙊 🐒 🐔 🐧 🐦 🐤 🐣 🐥 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐚 🐞 🐜 🦗 🦂 🐢 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦀 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🐘 🦏 🐪 🐫 🦒 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🐇 🐁 🐀 🦔 🐾 🐉 🐲 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🎍 🎋 🍃 🍂 🍁 🍄 🌾 💐 🌷 🌹 🥀 🌺 🌸 🌼 🌻 🌞 🌝 🌈 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🎻 🎲 💊 🏴‍☠️ 🛰️ 🚀 🛸)
-emoji="${emojis[RANDOM % ${#emojis[@]}]}"
-
-_venv_name() {
-  [[ -n "$VIRTUAL_ENV" ]] && basename "$VIRTUAL_ENV"
-}
-_git_branch() {
-  command -v git >/dev/null 2>&1 || return
-  git rev-parse --is-inside-work-tree &>/dev/null || return
-  local b dirty=""
-  b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null) || return
-  git diff --no-ext-diff --quiet --ignore-submodules --cached || dirty="*"
-  git diff --no-ext-diff --quiet --ignore-submodules || dirty="${dirty}+"
-  printf "%s%s" "$b" "$dirty"
-}
-_last_status_segment() {
-  local ec=$1
-  [[ $ec -eq 0 ]] && return
-  printf "✖ %d" "$ec"
-}
-
-# Chrono de la dernière commande
-__TIMER_START=0
-# Le trap DEBUG ne doit PAS se déclencher pendant PROMPT_COMMAND
-trap '[[ -z "${__PROMPT_RUNNING:-}" ]] && __TIMER_START=$SECONDS' DEBUG
-_last_cmd_duration() {
-  local dur=$(( $1 - __TIMER_START ))
-  (( dur > 1 )) && printf "%ss" "$dur"
-}
-
-# Historique partagé sans flush coûteux (pas de 'history -c; history -r' à chaque prompt)
-__history_sync() {
-  builtin history -a    # append new lines from this session
-  builtin history -n    # read new lines from other sessions
-}
-
-# Wrapper PROMPT_COMMAND : capture $? et SECONDS AVANT toute autre action
-__prompt_command() {
-  local exit_code=$?
-  local cmd_end=$SECONDS
-  __PROMPT_RUNNING=1
-  __history_sync
-  __prompt_build "$exit_code" "$cmd_end"
-  unset __PROMPT_RUNNING
-}
-
-__prompt_build() {
-  local exit_code=${1:-0}
-  local cmd_end=${2:-$SECONDS}
-  local userpart hostpart git venv dur err
-
-  if [[ $EUID -eq 0 ]]; then
-    userpart="${root_fg}${bold}${sym_root} root${reset}"
-    hostpart="${root_accent}${yellow} ${sym_host} \h${reset}"
-  else
-    userpart="${user_fg}${bold}${sym_user} \u${reset}"
-    hostpart="${user_accent}${yellow} ${sym_host} \h${reset}"
-  fi
-
-  local gb; gb=$(_git_branch)
-  [[ -n "$gb" ]] && git=" ${git_fg}${sym_branch} ${gb}${reset}"
-
-  local vn; vn=$(_venv_name)
-  [[ -n "$vn" ]] && venv=" ${time_fg}${sym_venv} ${vn}${reset}"
-
-  dur=$(_last_cmd_duration "$cmd_end")
-  [[ -n "$dur" ]] && dur=" ${time_fg}${sym_time} ${dur}${reset}"
-  local st; st=$(_last_status_segment "$exit_code")
-  [[ -n "$st" ]] && err=" ${err_bg} ${st} ${reset}"
-
-  local line1="${userpart} at ${hostpart}${git}${venv}${dur}${err}\n"
-  local pathpart="${bold}${blue}\w${reset}"
-  local chevron; if [[ $EUID -eq 0 ]]; then chevron="${root_fg}#${reset}"; else chevron="${user_fg}\$${reset}"; fi
-  PS1="\n${emoji} \[\e[0;36m\][\t]\[\e[0;m\] ${line1}${pathpart} ${chevron} "
-}
-
-# Compose PROMPT_COMMAND (idempotent au re-source)
-__install_prompt_command() {
-  [[ "${PROMPT_COMMAND:-}" == *"__prompt_command"* ]] && return
-  if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare \-a'; then
-    PROMPT_COMMAND+=(__prompt_command)
-  elif [[ -n "${PROMPT_COMMAND:-}" ]]; then
-    PROMPT_COMMAND="__prompt_command; ${PROMPT_COMMAND}"
-  else
-    PROMPT_COMMAND="__prompt_command"
-  fi
-}
-__install_prompt_command
-
-# --- Completions
-if [[ -r /usr/share/bash-completion/bash_completion ]]; then
-  . /usr/share/bash-completion/bash_completion
-elif [[ -r /etc/bash_completion ]]; then
-  . /etc/bash_completion
-fi
-if declare -F _git >/dev/null 2>&1; then
-  complete -o default -o nospace -F _git g
-fi
-command -v composer >/dev/null 2>&1 && eval "$(composer completion bash 2>/dev/null)" || true
-command -v symfony  >/dev/null 2>&1 && eval "$(symfony  completion bash 2>/dev/null)" || true
-[[ -f "$HOME/.fzf.bash" ]] && . "$HOME/.fzf.bash"
-
-# --- GPG TTY (utile pour les commits signés)
-command -v gpg >/dev/null 2>&1 && export GPG_TTY="$(tty)"
-
-# --- Banner hostname avec toilet/figlet + infos système (une seule fois par session)
-__motd_once() {
-  [[ -n "${BASHRC_MOTD_SHOWN:-}" ]] && return
-  [[ -t 1 ]] || return
-  local host
-  host=$(hostname -s)
-  if command -v toilet >/dev/null 2>&1; then
-    toilet -f smblock --filter border "$host" 2>/dev/null | lolcat 2>/dev/null || toilet -f smblock "$host" 2>/dev/null
-  elif command -v figlet >/dev/null 2>&1; then
-    figlet -f small "$host" 2>/dev/null | lolcat 2>/dev/null || figlet -f small "$host" 2>/dev/null
-  else
-    echo -e "\n  \e[1;35m>>> $host <<<\e[0m\n"
-  fi
-  if command -v fastfetch >/dev/null 2>&1; then
-    fastfetch --logo none --structure OS:Kernel:Uptime:Memory 2>/dev/null
-  fi
-  export BASHRC_MOTD_SHOWN=1
-}
-__motd_once || true
-
-# Source cargo/rustup si présent
-[[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
-BASHRC
+    cp "$BASHRC_TEMPLATE" "$target"
   }
+
 
   # /etc/skel pour futurs utilisateurs
   install_bashrc_for /etc/skel/.bashrc
@@ -2664,6 +2485,7 @@ BASHRC
   [[ -d /etc/update-motd.d ]] && chmod -x /etc/update-motd.d/* 2>/dev/null || true
 
   log ".bashrc déployé, /etc/motd vidé."
+  fi # fin template check
 fi
 
 fi # Fin du bloc if ! $AUDIT_MODE (skip installation)
@@ -2686,11 +2508,7 @@ echo ""
 printf "${BOLD}${MAGENTA}── Services ──${RESET}\n"
 
 # SSH
-if systemctl is-active --quiet ssh || systemctl is-active --quiet sshd; then
-  check_ok "SSH : actif"
-else
-  check_fail "SSH : inactif"
-fi
+check_service_active ssh "SSH" || check_service_active sshd "SSH" || true
 
 # UFW
 if $INSTALL_UFW; then
@@ -2713,8 +2531,7 @@ fi
 
 # Fail2ban
 if $INSTALL_FAIL2BAN; then
-  if systemctl is-active --quiet fail2ban; then
-    check_ok "Fail2ban : actif"
+  if check_service_active fail2ban "Fail2ban"; then
     JAILS=$(fail2ban-client status 2>/dev/null | grep "Jail list" | sed 's/.*:\s*//' | tr -d ' ')
     [[ -n "$JAILS" ]] && check_ok "Fail2ban jails : $JAILS"
     # Nombre d'IPs bannies actuellement
@@ -2731,8 +2548,6 @@ if $INSTALL_FAIL2BAN; then
       F2B_IGNOREIP=$(grep "^ignoreip" /etc/fail2ban/jail.local 2>/dev/null | cut -d= -f2 || true)
       check_ok "Fail2ban ignoreip : ${F2B_IGNOREIP:-non configuré}"
     fi
-  else
-    check_fail "Fail2ban : inactif"
   fi
 fi
 
@@ -2747,22 +2562,10 @@ if [[ -n "${TRUSTED_IPS:-}" ]]; then
 fi
 
 # Apache
-if $INSTALL_APACHE_PHP; then
-  if systemctl is-active --quiet apache2; then
-    check_ok "Apache : actif"
-  else
-    check_fail "Apache : inactif"
-  fi
-fi
+$INSTALL_APACHE_PHP && check_service_active apache2 "Apache"
 
 # MariaDB
-if $INSTALL_MARIADB; then
-  if systemctl is-active --quiet mariadb; then
-    check_ok "MariaDB : actif"
-  else
-    check_fail "MariaDB : inactif"
-  fi
-fi
+$INSTALL_MARIADB && check_service_active mariadb "MariaDB"
 
 # phpMyAdmin
 if $INSTALL_PHPMYADMIN; then
@@ -2781,51 +2584,16 @@ fi
 
 # Postfix
 if $INSTALL_POSTFIX_DKIM; then
-  if systemctl is-active --quiet postfix; then
-    check_ok "Postfix : actif"
-  else
-    check_fail "Postfix : inactif"
-  fi
-  if systemctl is-active --quiet opendkim; then
-    check_ok "OpenDKIM : actif"
-  else
-    check_fail "OpenDKIM : inactif"
-  fi
+  check_service_active postfix "Postfix"
+  check_service_active opendkim "OpenDKIM"
 fi
 
 # ClamAV
 if $INSTALL_CLAMAV; then
-  if systemctl is-active --quiet clamav-daemon; then
-    check_ok "ClamAV : actif"
-  else
-    check_warn "ClamAV : daemon inactif (peut prendre du temps au démarrage)"
-  fi
-  if [[ -x /root/scripts/clamav_scan.sh ]]; then
-    check_ok "ClamAV : script de scan présent"
-  else
-    check_fail "ClamAV : script de scan absent"
-  fi
-  if crontab -l 2>/dev/null | grep -q "clamav_scan.sh"; then
-    check_ok "ClamAV : cron quotidien configuré (2h00)"
-  else
-    check_warn "ClamAV : cron non configuré"
-  fi
-  # Vérifier la fraîcheur des signatures ClamAV
-  if [[ -f /var/lib/clamav/daily.cld ]] || [[ -f /var/lib/clamav/daily.cvd ]]; then
-    CLAMAV_DB=$(find /var/lib/clamav -name "daily.*" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
-    if [[ -n "$CLAMAV_DB" ]]; then
-      CLAMAV_AGE=$(( ($(date +%s) - ${CLAMAV_DB%.*}) / 86400 ))
-      if [[ "$CLAMAV_AGE" -le 1 ]]; then
-        check_ok "ClamAV : signatures à jour (< 24h)"
-      elif [[ "$CLAMAV_AGE" -le 7 ]]; then
-        check_warn "ClamAV : signatures datent de ${CLAMAV_AGE} jour(s)"
-      else
-        check_fail "ClamAV : signatures obsolètes (${CLAMAV_AGE} jours) - lancer freshclam"
-      fi
-    fi
-  else
-    check_warn "ClamAV : base de signatures non trouvée"
-  fi
+  check_service_active clamav-daemon "ClamAV"
+  [[ -x /root/scripts/clamav_scan.sh ]] && check_ok "ClamAV : script de scan présent" || check_fail "ClamAV : script de scan absent"
+  crontab -l 2>/dev/null | grep -q "clamav_scan.sh" && check_ok "ClamAV : cron quotidien configuré" || check_warn "ClamAV : cron non configuré"
+  check_db_freshness /var/lib/clamav "ClamAV" 1 "$DB_FRESH_DAYS" cli
 fi
 
 echo ""
@@ -2930,7 +2698,7 @@ if $INSTALL_APACHE_PHP; then
         CERT_EXPIRY_EPOCH=$(date -d "$CERT_EXPIRY" +%s 2>/dev/null || echo 0)
         NOW_EPOCH=$(date +%s)
         DAYS_LEFT=$(( (CERT_EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
-        if [[ "$DAYS_LEFT" -gt 30 ]]; then
+        if [[ "$DAYS_LEFT" -gt "$SSL_WARN_DAYS" ]]; then
           check_ok "SSL : certificat valide (expire dans ${DAYS_LEFT} jours)"
         elif [[ "$DAYS_LEFT" -gt 7 ]]; then
           check_warn "SSL : certificat expire dans ${DAYS_LEFT} jours"
@@ -3041,9 +2809,9 @@ fi
 LOG_SIZE=$(du -sh /var/log 2>/dev/null | awk '{print $1}')
 if [[ -n "$LOG_SIZE" ]]; then
   LOG_SIZE_MB=$(du -sm /var/log 2>/dev/null | awk '{print $1}')
-  if [[ "$LOG_SIZE_MB" -lt 1000 ]]; then
+  if [[ "$LOG_SIZE_MB" -lt "$LOG_SIZE_WARN_MB" ]]; then
     check_ok "Logs : ${LOG_SIZE} utilisés"
-  elif [[ "$LOG_SIZE_MB" -lt 5000 ]]; then
+  elif [[ "$LOG_SIZE_MB" -lt "$LOG_SIZE_FAIL_MB" ]]; then
     check_warn "Logs : ${LOG_SIZE} utilisés (envisager nettoyage)"
   else
     check_fail "Logs : ${LOG_SIZE} utilisés - nettoyage recommandé"
@@ -3060,20 +2828,7 @@ if $INSTALL_RKHUNTER; then
     if crontab -l 2>/dev/null | grep -q "rkhunter_scan"; then
       check_ok "rkhunter : cron hebdo configuré (dimanche 3h00)"
     fi
-    # Vérifier la fraîcheur de la base rkhunter
-    if [[ -f /var/lib/rkhunter/db/rkhunter.dat ]]; then
-      RKHUNTER_DB_DATE=$(stat -c %Y /var/lib/rkhunter/db/rkhunter.dat 2>/dev/null)
-      if [[ -n "$RKHUNTER_DB_DATE" ]]; then
-        RKHUNTER_AGE=$(( ($(date +%s) - $RKHUNTER_DB_DATE) / 86400 ))
-        if [[ "$RKHUNTER_AGE" -le 7 ]]; then
-          check_ok "rkhunter : base à jour (${RKHUNTER_AGE} jour(s))"
-        elif [[ "$RKHUNTER_AGE" -le 30 ]]; then
-          check_warn "rkhunter : base date de ${RKHUNTER_AGE} jours - lancer rkhunter --update"
-        else
-          check_fail "rkhunter : base obsolète (${RKHUNTER_AGE} jours)"
-        fi
-      fi
-    fi
+    check_db_freshness /var/lib/rkhunter/db/rkhunter.dat "rkhunter" "$DB_FRESH_DAYS" "$DB_STALE_DAYS" cli
   else
     check_warn "rkhunter : non installé"
   fi
@@ -3104,23 +2859,7 @@ fi
 if $INSTALL_AIDE; then
   if command -v aide >/dev/null 2>&1; then
     check_ok "AIDE : installé"
-    if [[ -f /var/lib/aide/aide.db ]]; then
-      AIDE_DB_DATE=$(stat -c %Y /var/lib/aide/aide.db 2>/dev/null)
-      if [[ -n "$AIDE_DB_DATE" ]]; then
-        AIDE_AGE=$(( ($(date +%s) - $AIDE_DB_DATE) / 86400 ))
-        if [[ "$AIDE_AGE" -le 7 ]]; then
-          check_ok "AIDE : base initialisée (${AIDE_AGE} jour(s))"
-        elif [[ "$AIDE_AGE" -le 30 ]]; then
-          check_warn "AIDE : base date de ${AIDE_AGE} jours (penser à mettre à jour après MAJ système)"
-        else
-          check_warn "AIDE : base ancienne (${AIDE_AGE} jours) - aide --update recommandé"
-        fi
-      else
-        check_ok "AIDE : base de données initialisée"
-      fi
-    else
-      check_warn "AIDE : base de données en cours d'initialisation..."
-    fi
+    check_db_freshness /var/lib/aide/aide.db "AIDE" "$DB_FRESH_DAYS" "$DB_STALE_DAYS" cli
     if [[ -x /root/scripts/aide_check.sh ]]; then
       check_ok "AIDE : script de vérification présent"
     fi
@@ -3942,7 +3681,7 @@ printf "${CYAN}Fichier log :${RESET} %s\n\n" "${LOG_FILE}"
 
 # ================================== MODE AUDIT : EMAIL ================================
 if $AUDIT_MODE; then
-  AUDIT_REPORT="/tmp/audit_report_$(date +%Y%m%d_%H%M%S).html"
+  AUDIT_REPORT="$(mktempfile .html)"
 
   # Génère le rapport HTML avec charte graphique Since & Co
   # Version email-compatible (tables, inline styles, pas de SVG)
@@ -4043,7 +3782,7 @@ SECTIONHTML
 
   add_html_check() {
     local status="$1" msg="$2"
-    local color="#6bdbdb" icon="•" bg="#f8f9fa"
+    local color="${HTML_COLOR_CYAN}" icon="•" bg="#f8f9fa"
     case "$status" in
       ok) color="#2e7d32"; icon="✓"; bg="#f1f8e9" ;;
       warn) color="#e65100"; icon="⚠"; bg="#fff8e1" ;;
@@ -4058,11 +3797,11 @@ SECTIONHTML
     local label="$1" value="$2" max="${3:-100}" color="${4:-green}"
     local pct=$((value * 100 / max))
     [[ "$pct" -gt 100 ]] && pct=100
-    local bar_color="#99c454"
+    local bar_color="${HTML_COLOR_GREEN}"
     case "$color" in
       orange) bar_color="#ff9800" ;;
-      red) bar_color="#dc5c3b" ;;
-      cyan) bar_color="#6bdbdb" ;;
+      red) bar_color="${HTML_COLOR_ACCENT}" ;;
+      cyan) bar_color="${HTML_COLOR_CYAN}" ;;
     esac
     cat >> "$AUDIT_REPORT" <<PROGHTML
                 <tr><td style="padding:8px 12px;">
@@ -4090,11 +3829,11 @@ PROGHTML
 
   add_stat_box() {
     local value="$1" label="$2" color="${3:-}"
-    local val_color="#142136"
+    local val_color="${HTML_COLOR_DARK}"
     case "$color" in
-      accent) val_color="#dc5c3b" ;;
-      cyan) val_color="#6bdbdb" ;;
-      green) val_color="#99c454" ;;
+      accent) val_color="${HTML_COLOR_ACCENT}" ;;
+      cyan) val_color="${HTML_COLOR_CYAN}" ;;
+      green) val_color="${HTML_COLOR_GREEN}" ;;
     esac
     echo "<td width='50%' style='background:#fff; border-radius:8px; padding:12px; text-align:center; border:1px solid #eee;'><div style='font-size:22px; font-weight:bold; color:${val_color};'>${value}</div><div style='font-size:10px; color:#888; text-transform:uppercase;'>${label}</div></td>" >> "$AUDIT_REPORT"
   }
@@ -4109,14 +3848,14 @@ PROGHTML
 
   # Services
   add_html_section "Services"
-  systemctl is-active --quiet sshd && add_html_check ok "SSH : actif" || add_html_check fail "SSH : inactif"
+  check_service_active sshd "SSH" html || check_service_active ssh "SSH" html || true
   ufw status | grep -qiE "(Status|État).*acti" && add_html_check ok "UFW : actif" || add_html_check warn "UFW : inactif"
-  systemctl is-active --quiet fail2ban && add_html_check ok "Fail2ban : actif" || add_html_check warn "Fail2ban : inactif"
-  $INSTALL_APACHE_PHP && { systemctl is-active --quiet apache2 && add_html_check ok "Apache : actif" || add_html_check fail "Apache : inactif"; }
-  $INSTALL_MARIADB && { systemctl is-active --quiet mariadb && add_html_check ok "MariaDB : actif" || add_html_check fail "MariaDB : inactif"; }
-  $INSTALL_POSTFIX_DKIM && { systemctl is-active --quiet postfix && add_html_check ok "Postfix : actif" || add_html_check warn "Postfix : inactif"; }
-  $INSTALL_POSTFIX_DKIM && { systemctl is-active --quiet opendkim && add_html_check ok "OpenDKIM : actif" || add_html_check warn "OpenDKIM : inactif"; }
-  $INSTALL_CLAMAV && { systemctl is-active --quiet clamav-daemon && add_html_check ok "ClamAV : actif" || add_html_check warn "ClamAV : inactif"; }
+  check_service_active fail2ban "Fail2ban" html
+  $INSTALL_APACHE_PHP && check_service_active apache2 "Apache" html
+  $INSTALL_MARIADB && check_service_active mariadb "MariaDB" html
+  $INSTALL_POSTFIX_DKIM && check_service_active postfix "Postfix" html
+  $INSTALL_POSTFIX_DKIM && check_service_active opendkim "OpenDKIM" html
+  $INSTALL_CLAMAV && check_service_active clamav-daemon "ClamAV" html
   close_section
 
   # Sécurité SSH
@@ -4146,7 +3885,7 @@ PROGHTML
       CERT_EXP_HTML=$(openssl x509 -enddate -noout -in "/etc/letsencrypt/live/${HOSTNAME_FQDN}/cert.pem" 2>/dev/null | cut -d= -f2)
       CERT_EXP_EPOCH_HTML=$(date -d "$CERT_EXP_HTML" +%s 2>/dev/null || echo 0)
       DAYS_LEFT_HTML=$(( (CERT_EXP_EPOCH_HTML - $(date +%s)) / 86400 ))
-      if [[ "$DAYS_LEFT_HTML" -gt 30 ]]; then
+      if [[ "$DAYS_LEFT_HTML" -gt "$SSL_WARN_DAYS" ]]; then
         add_html_check ok "SSL : expire dans ${DAYS_LEFT_HTML} jours"
       elif [[ "$DAYS_LEFT_HTML" -gt 10 ]]; then
         add_html_check warn "SSL : expire dans ${DAYS_LEFT_HTML} jours"
@@ -4178,10 +3917,10 @@ PROGHTML
   if $GEOIP_BLOCK; then
     if ipset list geoip_blocked >/dev/null 2>&1; then
       GEOIP_RANGES_HTML=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]' || echo "0")
-      add_html_check ok "GeoIP : ${GEOIP_RANGES_HTML} plages IP bloquées (103 pays)"
+      add_html_check ok "GeoIP : ${GEOIP_RANGES_HTML} plages IP bloquées (${GEOIP_COUNTRY_COUNT} pays)"
       add_stats_grid_open
       add_stat_box "${GEOIP_RANGES_HTML}" "Plages bloquées" "accent"
-      add_stat_box "103" "Pays bloqués" "cyan"
+      add_stat_box "${GEOIP_COUNTRY_COUNT}" "Pays bloqués" "cyan"
       add_stats_grid_close
     else
       add_html_check fail "GeoIP : ipset geoip_blocked non trouvé"
@@ -4327,61 +4066,13 @@ PROGHTML
   add_html_section "Bases de menaces"
 
   # ClamAV
-  if $INSTALL_CLAMAV; then
-    if [[ -f /var/lib/clamav/daily.cld ]] || [[ -f /var/lib/clamav/daily.cvd ]]; then
-      CLAMAV_DB_HTML=$(find /var/lib/clamav -name "daily.*" -type f -printf '%T@\n' 2>/dev/null | sort -n | tail -1)
-      if [[ -n "$CLAMAV_DB_HTML" ]]; then
-        CLAMAV_AGE_HTML=$(( ($(date +%s) - ${CLAMAV_DB_HTML%.*}) / 86400 ))
-        if [[ "$CLAMAV_AGE_HTML" -le 1 ]]; then
-          add_html_check ok "ClamAV : signatures à jour (< 24h)"
-        elif [[ "$CLAMAV_AGE_HTML" -le 7 ]]; then
-          add_html_check warn "ClamAV : signatures datent de ${CLAMAV_AGE_HTML} jour(s)"
-        else
-          add_html_check fail "ClamAV : signatures obsolètes (${CLAMAV_AGE_HTML} jours)"
-        fi
-      fi
-    else
-      add_html_check warn "ClamAV : base non trouvée"
-    fi
-  fi
+  $INSTALL_CLAMAV && check_db_freshness /var/lib/clamav "ClamAV" 1 "$DB_FRESH_DAYS" html
 
   # rkhunter
-  if $INSTALL_RKHUNTER; then
-    if [[ -f /var/lib/rkhunter/db/rkhunter.dat ]]; then
-      RKHUNTER_DB_HTML=$(stat -c %Y /var/lib/rkhunter/db/rkhunter.dat 2>/dev/null)
-      if [[ -n "$RKHUNTER_DB_HTML" ]]; then
-        RKHUNTER_AGE_HTML=$(( ($(date +%s) - $RKHUNTER_DB_HTML) / 86400 ))
-        if [[ "$RKHUNTER_AGE_HTML" -le 7 ]]; then
-          add_html_check ok "rkhunter : base à jour (${RKHUNTER_AGE_HTML} jour(s))"
-        elif [[ "$RKHUNTER_AGE_HTML" -le 30 ]]; then
-          add_html_check warn "rkhunter : base date de ${RKHUNTER_AGE_HTML} jours"
-        else
-          add_html_check fail "rkhunter : base obsolète (${RKHUNTER_AGE_HTML} jours)"
-        fi
-      fi
-    else
-      add_html_check warn "rkhunter : base non trouvée"
-    fi
-  fi
+  $INSTALL_RKHUNTER && check_db_freshness /var/lib/rkhunter/db/rkhunter.dat "rkhunter" "$DB_FRESH_DAYS" "$DB_STALE_DAYS" html
 
   # AIDE
-  if $INSTALL_AIDE; then
-    if [[ -f /var/lib/aide/aide.db ]]; then
-      AIDE_DB_HTML=$(stat -c %Y /var/lib/aide/aide.db 2>/dev/null)
-      if [[ -n "$AIDE_DB_HTML" ]]; then
-        AIDE_AGE_HTML=$(( ($(date +%s) - $AIDE_DB_HTML) / 86400 ))
-        if [[ "$AIDE_AGE_HTML" -le 7 ]]; then
-          add_html_check ok "AIDE : base à jour (${AIDE_AGE_HTML} jour(s))"
-        elif [[ "$AIDE_AGE_HTML" -le 30 ]]; then
-          add_html_check warn "AIDE : base date de ${AIDE_AGE_HTML} jours"
-        else
-          add_html_check warn "AIDE : base ancienne (${AIDE_AGE_HTML} jours)"
-        fi
-      fi
-    else
-      add_html_check warn "AIDE : base non initialisée"
-    fi
-  fi
+  $INSTALL_AIDE && check_db_freshness /var/lib/aide/aide.db "AIDE" "$DB_FRESH_DAYS" "$DB_STALE_DAYS" html
 
   # Fail2ban
   if systemctl is-active --quiet fail2ban; then
@@ -4462,7 +4153,7 @@ PROGHTML
   LOG_SIZE_MB_HTML=$(du -sm /var/log 2>/dev/null | awk '{print $1}')
   if [[ -n "$LOG_SIZE_MB_HTML" ]]; then
     LOG_SIZE_HTML=$(du -sh /var/log 2>/dev/null | awk '{print $1}')
-    [[ "$LOG_SIZE_MB_HTML" -lt 1000 ]] && add_html_check ok "Logs : ${LOG_SIZE_HTML}" || add_html_check warn "Logs : ${LOG_SIZE_HTML}"
+    [[ "$LOG_SIZE_MB_HTML" -lt "$LOG_SIZE_WARN_MB" ]] && add_html_check ok "Logs : ${LOG_SIZE_HTML}" || add_html_check warn "Logs : ${LOG_SIZE_HTML}"
   fi
 
   # Zombies
@@ -4538,13 +4229,8 @@ for old_conf in "/root/.bootstrap.conf" "${SCRIPT_DIR}/.bootstrap.conf"; do
   fi
 done
 
-# Ajoute/met à jour le cron pour l'audit hebdomadaire (lundi 7h00)
-CRON_AUDIT="0 7 * * 1 ${INSTALL_SCRIPT_PATH} --audit >/dev/null 2>&1"
-
-EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-# Supprimer les anciennes entrées audit — idempotent
-CLEANED_CRON=$(echo "$EXISTING_CRON" | grep -v "\-\-audit" | grep -v "# Audit de sécurité" || true)
-echo -e "${CLEANED_CRON}\n# Audit de sécurité hebdomadaire (lundi 7h00)\n${CRON_AUDIT}" | grep -v '^$' | crontab -
+# Ajoute/met à jour le cron pour l'audit hebdomadaire
+add_cron_job "\-\-audit" "${CRON_AUDIT} ${INSTALL_SCRIPT_PATH} --audit >/dev/null 2>&1" "Audit de sécurité hebdomadaire (lundi 7h00)"
 log "Cron audit configuré → ${INSTALL_SCRIPT_PATH} --audit"
 
 # Attendre la fin de l'initialisation AIDE si lancée en arrière-plan
