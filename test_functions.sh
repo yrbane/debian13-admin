@@ -19,14 +19,36 @@ check_ok()   { echo "OK: $*"; }
 check_warn() { echo "WARN: $*"; }
 check_fail() { echo "FAIL: $*"; }
 add_html_check() { echo "HTML_${1}: ${2}"; }
+CYAN=""; RESET=""
+CHECK_MODE="cli"
+emit_check() {
+  local status="$1" msg="$2"
+  if [[ "$CHECK_MODE" == "html" ]]; then
+    add_html_check "$status" "$msg"
+  else
+    case "$status" in
+      ok)   check_ok "$msg" ;;
+      warn) check_warn "$msg" ;;
+      fail) check_fail "$msg" ;;
+      info) echo "INFO: $msg" ;;
+    esac
+  fi
+}
 LOG_FILE="/dev/null"
 DB_FRESH_DAYS=7
 DB_STALE_DAYS=30
 
-# Source les fonctions utilitaires
-eval "$(sed -n '/^deploy_script()/,/^# =* MODULES/{ /^# =* MODULES/d; p; }' /home/debian/scripts/debian13-server.sh)"
-# Source aussi add_cron_job (nécessaire pour deploy_script)
-eval "$(sed -n '/^add_cron_job()/,/^}/p' /home/debian/scripts/debian13-server.sh)"
+# Source les bibliothèques (core pour log/warn/err, helpers pour les fonctions testées)
+RED=""; GREEN=""; YELLOW=""; BLUE=""; MAGENTA=""; CYAN=""; BOLD=""; RESET=""
+log()     { :; }
+warn()    { :; }
+err()     { :; }
+note()    { :; }
+section() { :; }
+die()     { exit 1; }
+# Source helpers (skip the trap it installs — we reset it after)
+source /home/debian/scripts/lib/helpers.sh
+trap - ERR EXIT
 
 echo "=== Test php_ini_set ==="
 TMPINI=$(mktemp)
@@ -51,8 +73,10 @@ RESULT=$(check_file_perms "$TMPFILE" "TestFile" "600")
 assert_eq "permissions 600 ok" "OK: TestFile : permissions correctes (600)" "$RESULT"
 RESULT=$(check_file_perms "$TMPFILE" "TestFile" "700")
 assert_eq "permissions 600 vs 700 warn" "WARN: TestFile : permissions = 600 (attendu : 700)" "$RESULT"
-RESULT=$(check_file_perms "$TMPFILE" "TestFile" "600|640" "html")
+CHECK_MODE="html"
+RESULT=$(check_file_perms "$TMPFILE" "TestFile" "600|640")
 assert_eq "html mode ok" "HTML_ok: TestFile : permissions correctes (600)" "$RESULT"
+CHECK_MODE="cli"
 rm -f "$TMPFILE"
 
 echo ""
@@ -106,8 +130,10 @@ RESULT=$(check_config_grep "$TMPCONF" "^PermitRootLogin\s+no" "root ok" "root fa
 assert_eq "config grep ok" "OK: root ok" "$RESULT"
 RESULT=$(check_config_grep "$TMPCONF" "^PasswordAuthentication\s+no" "pass ok" "pass fail")
 assert_eq "config grep fail" "FAIL: pass fail" "$RESULT"
-RESULT=$(check_config_grep "$TMPCONF" "^Port\s+65222" "port ok" "port fail" "html")
+CHECK_MODE="html"
+RESULT=$(check_config_grep "$TMPCONF" "^Port\s+65222" "port ok" "port fail")
 assert_eq "config grep html ok" "HTML_ok: port ok" "$RESULT"
+CHECK_MODE="cli"
 rm -f "$TMPCONF"
 
 echo ""

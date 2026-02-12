@@ -1,0 +1,52 @@
+#!/bin/bash
+
+# Destinataire du mail
+MAILTO="__EMAIL__"
+
+# Fichier temporaire
+TMPFILE=$(mktemp)
+
+# Met à jour la liste des paquets silencieusement
+apt update -qq
+
+# Début du HTML
+echo "<html><body>" > "$TMPFILE"
+echo "<h2>Mises à jour disponibles sur $(hostname)</h2>" >> "$TMPFILE"
+echo "<p><strong>Date :</strong> $(date '+%Y-%m-%d %H:%M:%S')</p>" >> "$TMPFILE"
+echo "<table border='1' cellpadding='5' cellspacing='0' style='border-collapse: collapse;'>" >> "$TMPFILE"
+echo "<tr style='background-color: #f2f2f2;'><th>Paquet</th><th>Version installée</th><th>Version disponible</th><th>Dépôt</th></tr>" >> "$TMPFILE"
+
+# Compteur
+COUNT=0
+
+# Parcours tous les paquets upgradable
+while read -r line; do
+    [[ -z "$line" ]] && continue
+    PKG=$(echo "$line" | awk -F/ '{print $1}')
+    INSTALLED=$(apt-cache policy "$PKG" 2>/dev/null | grep Installed | awk '{print $2}')
+    CANDIDATE=$(apt-cache policy "$PKG" 2>/dev/null | grep Candidate | awk '{print $2}')
+    REPO=$(apt-cache policy "$PKG" 2>/dev/null | grep -E "http|https" | head -n1 | xargs)
+
+    echo "<tr style='background-color: #ffeb99;'><td>$PKG</td><td>$INSTALLED</td><td>$CANDIDATE</td><td>$REPO</td></tr>" >> "$TMPFILE"
+    COUNT=$((COUNT + 1))
+done < <(apt list --upgradable 2>/dev/null | grep -v "^Listing")
+
+echo "</table>" >> "$TMPFILE"
+
+# Message si pas de paquet
+if [[ $COUNT -eq 0 ]]; then
+    echo "<p style='color: green;'><strong>✅ Tous les paquets sont à jour.</strong></p>" >> "$TMPFILE"
+fi
+
+# Fin du HTML
+echo "</body></html>" >> "$TMPFILE"
+
+# Envoie le mail
+if [[ $COUNT -gt 0 ]]; then
+    mail -a "Content-Type: text/html; charset=UTF-8" -s "⚠️ $COUNT mise(s) à jour disponible(s) sur $(hostname)" "$MAILTO" < "$TMPFILE"
+else
+    mail -a "Content-Type: text/html; charset=UTF-8" -s "✅ Système à jour sur $(hostname)" "$MAILTO" < "$TMPFILE"
+fi
+
+# Supprime le fichier temporaire
+rm -f "$TMPFILE"

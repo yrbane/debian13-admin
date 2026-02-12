@@ -1,0 +1,42 @@
+#!/bin/bash
+MAILTO="__EMAIL__"
+LOGFILE="/var/log/aide/aide_check_$(date +%Y%m%d).log"
+
+mkdir -p /var/log/aide
+
+# Vérifie si la base existe
+if [ ! -f /var/lib/aide/aide.db ]; then
+    echo "Base AIDE non initialisée" > "$LOGFILE"
+    exit 1
+fi
+
+# Exécute la vérification
+aide --check > "$LOGFILE" 2>&1
+RESULT=$?
+
+# Si des changements sont détectés (exit code != 0)
+if [ $RESULT -ne 0 ]; then
+    CHANGES=$(cat "$LOGFILE" | head -100)
+    (
+        echo "To: $MAILTO"
+        echo "Subject: [AIDE] Modifications détectées sur $(hostname)"
+        echo "Content-Type: text/html; charset=UTF-8"
+        echo "MIME-Version: 1.0"
+        echo ""
+        echo "<html><body>"
+        echo "<h2 style='color:#cc0000;'>⚠️ AIDE - Fichiers modifiés détectés</h2>"
+        echo "<p><strong>Serveur :</strong> $(hostname)</p>"
+        echo "<p><strong>Date :</strong> $(date '+%Y-%m-%d %H:%M:%S')</p>"
+        echo "<p>Des modifications de fichiers système ont été détectées :</p>"
+        echo "<pre style='background:#f5f5f5;padding:10px;font-size:11px;'>$CHANGES</pre>"
+        echo "<p><strong>Actions recommandées :</strong></p>"
+        echo "<ul>"
+        echo "<li>Vérifier si les changements sont légitimes (mises à jour système)</li>"
+        echo "<li>Si OK, mettre à jour la base : <code>aide --update && mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db</code></li>"
+        echo "</ul>"
+        echo "</body></html>"
+    ) | sendmail -t
+fi
+
+# Nettoyage logs > 30 jours
+find /var/log/aide -name "aide_check_*.log" -mtime +__AIDE_RETENTION__ -delete 2>/dev/null || true
