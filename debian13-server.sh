@@ -60,6 +60,14 @@ die()     { err "$1"; exit 1; }
 
 trap 'err "Erreur à la ligne $LINENO. Consulte le journal si nécessaire."' ERR
 
+# ---------------------------------- Constantes (chemins, seuils, versions) -----------
+readonly MIN_DISK_KB=2097152          # 2 Go minimum d'espace libre
+readonly NVM_VERSION="v0.40.1"
+readonly PMA_ALIAS_LENGTH=12          # Longueur du suffixe aléatoire phpMyAdmin
+readonly CLAMAV_LOG_RETENTION_DAYS=180
+readonly RKHUNTER_LOG_RETENTION_DAYS=30
+readonly AIDE_LOG_RETENTION_DAYS=30
+
 # ---------------------------------- Valeurs par défaut -------------------------------
 HOSTNAME_FQDN_DEFAULT="example.com"
 SSH_PORT_DEFAULT="65222"
@@ -193,6 +201,50 @@ if ! grep -qi 'debian' /etc/os-release; then
   warn "Distribution non détectée comme Debian. Le script cible Debian 13 (trixie)."
 fi
 
+# ---------------------------------- Vérifications pré-installation ----------------------
+preflight_checks() {
+  local errors=0
+
+  # Espace disque minimum
+  local avail_kb
+  avail_kb=$(df / --output=avail | tail -1 | tr -d ' ')
+  if (( avail_kb < MIN_DISK_KB )); then
+    err "Espace disque insuffisant sur / : $(( avail_kb / 1024 )) Mo disponibles (minimum $(( MIN_DISK_KB / 1024 )) Mo)"
+    ((errors++))
+  fi
+
+  # Connectivité réseau
+  if ! curl -sf --max-time 5 https://deb.debian.org/ >/dev/null 2>&1; then
+    err "Pas de connectivité vers les dépôts Debian (https://deb.debian.org/)"
+    ((errors++))
+  fi
+
+  # Résolution DNS
+  if ! host -W 3 deb.debian.org >/dev/null 2>&1; then
+    warn "Résolution DNS lente ou absente — vérifiez /etc/resolv.conf"
+  fi
+
+  # Version Debian
+  if [[ -f /etc/os-release ]]; then
+    local version_id
+    version_id=$(grep -oP 'VERSION_ID="\K[^"]+' /etc/os-release 2>/dev/null || echo "")
+    if [[ -n "$version_id" && "$version_id" -lt 13 ]] 2>/dev/null; then
+      warn "Debian ${version_id} détectée. Ce script est conçu pour Debian 13 (trixie)."
+    fi
+  fi
+
+  if (( errors > 0 )); then
+    die "Vérifications pré-installation échouées (${errors} erreur(s)). Corrigez avant de relancer."
+  fi
+
+  log "Vérifications pré-installation OK."
+}
+
+# Ne lancer les vérifications que en mode installation (pas audit)
+if [[ "${AUDIT_MODE:-false}" != "true" ]]; then
+  preflight_checks
+fi
+
 # ---------------------------------- Entrées utilisateur -------------------------------
 # (Code en anglais, documentation/texte en français)
 prompt_default() {
@@ -256,6 +308,12 @@ CONF
 
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
+    # Vérifier que le fichier ne contient que des affectations de variables attendues
+    if grep -qvE '^\s*#|^\s*$|^[A-Z_]+=' "$CONFIG_FILE"; then
+      warn "Le fichier de config ${CONFIG_FILE} contient des lignes suspectes :"
+      grep -vE '^\s*#|^\s*$|^[A-Z_]+=' "$CONFIG_FILE" | head -5
+      die "Corrigez le fichier de config ou supprimez-le pour le recréer."
+    fi
     # Désactiver temporairement set -u pour gérer les anciennes configs
     set +u
     # shellcheck disable=SC1090
@@ -371,6 +429,10 @@ show_config() {
 ask_all_questions() {
   section "Paramètres de base"
   HOSTNAME_FQDN="$(prompt_default "Nom d'hôte (FQDN)" "$HOSTNAME_FQDN_DEFAULT")"
+  # Validation FQDN basique
+  if [[ ! "$HOSTNAME_FQDN" =~ ^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$ ]]; then
+    warn "Le hostname '${HOSTNAME_FQDN}' ne semble pas être un FQDN valide (ex: server.example.com)"
+  fi
   SSH_PORT="$(prompt_default 'Port SSH' "$SSH_PORT_DEFAULT")"
   ADMIN_USER="$(prompt_default 'Utilisateur admin (clé SSH déjà en place)' "$ADMIN_USER_DEFAULT")"
   DKIM_SELECTOR="$(prompt_default 'DKIM selector' "$DKIM_SELECTOR_DEFAULT")"
@@ -554,7 +616,11 @@ export DEBIAN_FRONTEND
 backup_file() {
   local f="$1"
   if [[ -f "$f" ]]; then
-    cp -a "$f" "${f}.$(date +%Y%m%d%H%M%S).bak"
+    local bak="${f}.$(date +%Y%m%d%H%M%S).bak"
+    if ! cp -a "$f" "$bak"; then
+      warn "Impossible de sauvegarder ${f} → ${bak}"
+      return 1
+    fi
   fi
 }
 
@@ -562,6 +628,10 @@ backup_file() {
 run_as_user() {
   if [[ -z "${ADMIN_USER:-}" ]]; then
     warn "ADMIN_USER non défini, commande ignorée: $1"
+    return 1
+  fi
+  if ! id "$ADMIN_USER" &>/dev/null; then
+    warn "L'utilisateur ${ADMIN_USER} n'existe pas, commande ignorée: $1"
     return 1
   fi
   sudo -u "$ADMIN_USER" -H bash -c "$1"
@@ -698,9 +768,9 @@ ipset create geoip_blocked_new hash:net -exist
 
 for country in $COUNTRIES; do
   url="https://www.ipdeny.com/ipblocks/data/countries/${country}.zone"
-  curl -s "$url" 2>/dev/null | while read -r ip; do
-    [[ -n "$ip" ]] && ipset add geoip_blocked_new "$ip" 2>/dev/null
-  done
+  while read -r ip; do
+    [[ -n "$ip" ]] && ipset add geoip_blocked_new "$ip" 2>/dev/null || true
+  done < <(curl -s "$url" 2>/dev/null)
 done
 
 # Remplacer l'ancien set par le nouveau
@@ -756,8 +826,8 @@ findtime = 10m
 maxretry = 5
 backend = systemd
 ignoreip = ${FAIL2BAN_IGNOREIP}
-destemail = root@localhost
-sender = fail2ban@localhost
+destemail = ${EMAIL_FOR_CERTBOT}
+sender = fail2ban@${DKIM_DOMAIN:-\$(hostname -d)}
 mta = sendmail
 
 [sshd]
@@ -1292,8 +1362,9 @@ PMASEC
     warn "URL phpMyAdmin : https://${HOSTNAME_FQDN}/${PMA_ALIAS}"
     note "Conservez cette URL, elle n'est pas /phpmyadmin par sécurité."
 
-    # Sauvegarder l'alias dans un fichier pour référence
+    # Sauvegarder l'alias dans un fichier pour référence (lecture root uniquement)
     echo "${PMA_ALIAS}" > /root/.phpmyadmin_alias
+    chmod 600 /root/.phpmyadmin_alias
   fi
 fi
 
@@ -1340,6 +1411,7 @@ if $INSTALL_POSTFIX_DKIM; then
       chmod 644 "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
     else
       warn "Échec de génération de clé DKIM. Vérifiez manuellement."
+      DKIM_NEEDS_CONFIG=false  # Pas de config sans clé valide
     fi
     # Restaurer les permissions restrictives
     chmod 750 "${DKIM_KEYDIR}"
@@ -1417,17 +1489,19 @@ fi
 if $INSTALL_NODE; then
   section "Node.js via nvm (LTS) pour ${ADMIN_USER}"
   USER_HOME="$(get_user_home)"
-  NVM_VERSION="v0.40.1"
 
-  # Installation de nvm pour l'utilisateur admin
+  # Installation de nvm pour l'utilisateur admin (download then execute)
+  NVM_INSTALLER="/tmp/nvm-install-$$.sh"
+  curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh" -o "$NVM_INSTALLER"
   run_as_user "
     export NVM_DIR=\"${USER_HOME}/.nvm\"
     mkdir -p \"\$NVM_DIR\"
-    curl -fsSL \"https://raw.githubusercontent.com/nvm-sh/nvm/${NVM_VERSION}/install.sh\" | bash
+    bash \"$NVM_INSTALLER\"
     source \"\$NVM_DIR/nvm.sh\"
     nvm install --lts
     nvm alias default 'lts/*'
   "
+  rm -f "$NVM_INSTALLER"
 
   # Liens symboliques globaux (optionnel, pour que root puisse aussi utiliser node)
   if [[ -f "${USER_HOME}/.nvm/nvm.sh" ]]; then
@@ -1449,9 +1523,12 @@ if $INSTALL_RUST; then
 
   # Vérifie si rustup est déjà installé pour l'utilisateur
   if ! sudo -u "$ADMIN_USER" -H bash -c "command -v rustup" >/dev/null 2>&1; then
+    RUSTUP_INSTALLER="/tmp/rustup-init-$$.sh"
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs -o "$RUSTUP_INSTALLER"
     run_as_user "
-      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      bash \"$RUSTUP_INSTALLER\" -y --default-toolchain stable
     "
+    rm -f "$RUSTUP_INSTALLER"
   fi
 
   # Liens symboliques globaux
@@ -1496,12 +1573,24 @@ if $INSTALL_COMPOSER; then
   # Crée le répertoire bin local si nécessaire
   run_as_user "mkdir -p ${USER_HOME}/.local/bin"
 
-  # Télécharge et installe Composer pour l'utilisateur
-  run_as_user "
-    php -r \"copy('https://getcomposer.org/installer', '/tmp/composer-setup.php');\"
-    php /tmp/composer-setup.php --install-dir=${USER_HOME}/.local/bin --filename=composer
-    rm -f /tmp/composer-setup.php
-  "
+  # Télécharge et installe Composer pour l'utilisateur (download then execute)
+  COMPOSER_INSTALLER="/tmp/composer-setup-$$.php"
+  curl -fsSL https://getcomposer.org/installer -o "$COMPOSER_INSTALLER"
+  # Vérification du hash (optionnel mais recommandé)
+  EXPECTED_SIG="$(curl -fsSL https://composer.github.io/installer.sig 2>/dev/null || true)"
+  if [[ -n "$EXPECTED_SIG" ]]; then
+    ACTUAL_SIG="$(php -r "echo hash_file('sha384', '$COMPOSER_INSTALLER');")"
+    if [[ "$EXPECTED_SIG" != "$ACTUAL_SIG" ]]; then
+      warn "Signature Composer invalide ! Installation annulée."
+      rm -f "$COMPOSER_INSTALLER"
+    fi
+  fi
+  if [[ -f "$COMPOSER_INSTALLER" ]]; then
+    run_as_user "
+      php \"$COMPOSER_INSTALLER\" --install-dir=${USER_HOME}/.local/bin --filename=composer
+    "
+    rm -f "$COMPOSER_INSTALLER"
+  fi
 
   # Lien symbolique global
   if [[ -f "${USER_HOME}/.local/bin/composer" ]]; then
@@ -1548,8 +1637,11 @@ if $INSTALL_SYMFONY; then
     ghostscript \
     | tee -a "$LOG_FILE"
 
-  # Installer Symfony CLI
-  curl -1sLf 'https://dl.cloudsmith.io/public/symfony/stable/setup.deb.sh' | sudo bash
+  # Installer Symfony CLI (download then execute)
+  SYMFONY_REPO_SETUP="/tmp/symfony-repo-setup-$$.sh"
+  curl -1sLf 'https://dl.cloudsmith.io/public/symfony/stable/setup.deb.sh' -o "$SYMFONY_REPO_SETUP"
+  bash "$SYMFONY_REPO_SETUP"
+  rm -f "$SYMFONY_REPO_SETUP"
   apt-get install -y symfony-cli | tee -a "$LOG_FILE"
 
   # Vérifier l'installation
@@ -1787,12 +1879,11 @@ RKHUNTERSCAN
   sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/rkhunter_scan.sh
   chmod +x /root/scripts/rkhunter_scan.sh
 
-  # Cron hebdomadaire (dimanche 3h00)
+  # Cron hebdomadaire (dimanche 3h00) — idempotent
   CRON_LINE="0 3 * * 0 /root/scripts/rkhunter_scan.sh >/dev/null 2>&1"
   CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-  if ! echo "$CURRENT_CRON" | grep -q "rkhunter_scan"; then
-    (echo "$CURRENT_CRON"; echo "# rkhunter scan hebdomadaire (dimanche 3h00)"; echo "$CRON_LINE") | crontab -
-  fi
+  NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "rkhunter_scan" || true)
+  echo -e "${NEW_CRON}\n# rkhunter scan hebdomadaire (dimanche 3h00)\n${CRON_LINE}" | grep -v '^$' | crontab -
 
   log "rkhunter installé et configuré (scan hebdomadaire dimanche 3h00)"
 fi
@@ -1953,12 +2044,11 @@ AIDECHECK
   sed -i "s|__EMAIL__|${EMAIL_FOR_CERTBOT}|g" /root/scripts/aide_check.sh
   chmod +x /root/scripts/aide_check.sh
 
-  # Cron quotidien (4h00)
+  # Cron quotidien (4h00) — idempotent
   CRON_LINE="0 4 * * * /root/scripts/aide_check.sh >/dev/null 2>&1"
   CURRENT_CRON=$(crontab -l 2>/dev/null || true)
-  if ! echo "$CURRENT_CRON" | grep -q "aide_check"; then
-    (echo "$CURRENT_CRON"; echo "# AIDE vérification quotidienne (4h00)"; echo "$CRON_LINE") | crontab -
-  fi
+  NEW_CRON=$(echo "$CURRENT_CRON" | grep -v "aide_check" || true)
+  echo -e "${NEW_CRON}\n# AIDE vérification quotidienne (4h00)\n${CRON_LINE}" | grep -v '^$' | crontab -
 
   log "AIDE installé (vérification quotidienne 4h00, initialisation en cours...)"
 fi
@@ -1977,8 +2067,7 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
   fi
 
   # Mode DetectionOnly pour commencer (évite les faux positifs)
-  sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine DetectionOnly/' /etc/modsecurity/modsecurity.conf
-  sed -i 's/SecRuleEngine On/SecRuleEngine DetectionOnly/' /etc/modsecurity/modsecurity.conf
+  sed -i 's/^SecRuleEngine .*/SecRuleEngine DetectionOnly/' /etc/modsecurity/modsecurity.conf
 
   # Configurer les logs
   sed -i 's|SecAuditLog .*|SecAuditLog /var/log/apache2/modsec_audit.log|' /etc/modsecurity/modsecurity.conf
@@ -1991,8 +2080,8 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
 WHITELIST_HEADER
     rule_id=1000001
     for ip in $TRUSTED_IPS; do
-      # Échapper les points pour regex
-      ip_escaped=$(echo "$ip" | sed 's/\./\\\\./g')
+      # Échapper tous les caractères spéciaux regex
+      ip_escaped=$(echo "$ip" | sed 's/[.[\/*+?{}()|^$]/\\\\&/g')
       echo "SecRule REMOTE_ADDR \"^${ip_escaped}\$\" \"id:${rule_id},phase:1,allow,nolog,msg:'Trusted IP whitelist: ${ip}'\"" >> /etc/modsecurity/whitelist-trusted-ips.conf
       ((rule_id++))
     done
@@ -2169,49 +2258,70 @@ if $INSTALL_BASHRC_GLOBAL; then
     backup_file "$target"
     cat >"$target" <<'BASHRC'
 # If not running interactively, don't do anything
-case $- in
-    *i*) ;;
-      *) return;;
-esac
+case $- in *i*) ;; *) return ;; esac
 
-# --- Locales & éditeur (cohérent sur serveurs)
-export LANG=${LANG:-fr_FR.UTF-8}
-export LC_ALL=${LC_ALL:-fr_FR.UTF-8}
-export EDITOR=${EDITOR:-nano}
-export VISUAL=${VISUAL:-nano}
-export PAGER=${PAGER:-less}
-export LESS='-R --mouse --ignore-case --LONG-PROMPT --prompt="Less → %f  %lb/%L  (ligne %l)"'
+# --- Locales & editor (cohérent sur serveurs)
+export LANG="${LANG:-fr_FR.UTF-8}"
+export LC_ALL="${LC_ALL:-fr_FR.UTF-8}"
+export EDITOR="${EDITOR:-nano}"
+export VISUAL="${VISUAL:-nano}"
+export PAGER="${PAGER:-less}"
+# Prompt lisible dans less (messages en anglais côté "code")
+export LESS='-R --mouse --ignore-case --LONG-PROMPT --prompt="Less → %f  %lb/%L  (line %l)"'
+# Par prudence, désactive les fonctions risquées de less (! et |).
+export LESSSECURE=1
 
-# --- Historique : utile en prod + dédoublonnage + timestamps
+# --- Defaults sécurité (interactif)
+# Masque par défaut : fichiers non accessibles aux "others"
+umask 027
+# Empêche l'écrasement involontaire avec '>' (utiliser '>|' pour forcer)
+set -o noclobber
+
+# --- Historique : volumineux, horodaté, partagé entre sessions sans flush complet
 export HISTSIZE=50000
 export HISTFILESIZE=100000
 export HISTTIMEFORMAT='%F %T  '
 export HISTCONTROL=ignoreboth:erasedups
-export PROMPT_COMMAND="history -a; history -c; history -r; $PROMPT_COMMAND"
+# Ignore les commandes banales dans l'historique (ajoute/retire à ton goût)
+export HISTIGNORE='ls:ll:la:cd:pwd:exit:clear'
 
 # --- Bash options (qualité de vie)
-shopt -s autocd
-shopt -s cdspell
-shopt -s checkjobs
-shopt -s dirspell
-shopt -s extglob globstar
-shopt -s histappend
-shopt -s cmdhist
-shopt -s checkwinsize
+shopt -s autocd              # 'cd' implicite
+shopt -s cdspell dirspell    # tolérance fautes de frappe sur cd/dirs
+shopt -s checkjobs           # avertit si jobs en arrière-plan à la fermeture
+shopt -s extglob globstar    # globbing avancé + ** récursif
+shopt -s histappend cmdhist  # concatène l'historique + conserve commandes multilignes
+shopt -s checkwinsize        # met à jour LINES/COLUMNS
+# Readline : complétion sympa
 bind 'set completion-ignore-case on'
 bind 'set show-all-if-ambiguous on'
+bind '"\e[Z": menu-complete-backward'
+
+# --- PATH helpers (ajoute sans doublon)
+path_prepend() { case ":$PATH:" in *":$1:"*) ;; *) PATH="$1:$PATH";; esac; }
+path_append()  { case ":$PATH:" in *":$1:"*) ;; *) PATH="$PATH:$1";; esac; }
 
 # --- PATH & outils (ajoute si présents)
-[[ -d "/usr/sbin" ]] && [[ ":$PATH:" != *":/usr/sbin:"* ]] && PATH="/usr/sbin:$PATH"
-[[ -d "$HOME/.local/bin" ]] && PATH="$HOME/.local/bin:$PATH"
-[[ -d "$HOME/bin" ]] && PATH="$HOME/bin:$PATH"
+[[ -d "$HOME/.local/bin" ]] && path_prepend "$HOME/.local/bin"
+[[ -d "$HOME/bin"        ]] && path_prepend "$HOME/bin"
+path_append "/usr/games"
+path_append "/usr/local/games"
 export PATH
 
-# --- ls/grep améliorés (exa/lsd si dispo)
+# --- Couleurs LS_COLORS (sans réécraser les alias ls)
+if command -v dircolors >/dev/null 2>&1; then
+  if [[ -r "$HOME/.dircolors" ]]; then
+    eval "$(dircolors -b "$HOME/.dircolors")"
+  else
+    eval "$(dircolors -b)"
+  fi
+fi
+
+# --- ls/grep améliorés (eza/lsd si dispo) — défini UNE SEULE FOIS
 if command -v eza >/dev/null 2>&1; then
-  alias ls='eza --group-directories-first --git'
-  alias ll='eza -l --group-directories-first --git'
-  alias la='eza -la --group-directories-first --git'
+  alias ls='eza --group-directories-first --git --icons=auto'
+  alias ll='eza -l --group-directories-first --git --icons=auto'
+  alias la='eza -la --group-directories-first --git --icons=auto'
 elif command -v lsd >/dev/null 2>&1; then
   alias ls='lsd --group-dirs=first'
   alias ll='lsd -l --group-dirs=first'
@@ -2222,24 +2332,31 @@ else
   alias la='ls -A --color=auto --group-directories-first'
 fi
 alias grep='grep --color=auto'
+alias fgrep='grep -F --color=auto'
+alias egrep='grep -E --color=auto'
 alias df='df -h'
 alias free='free -h'
 alias folder='du -h --max-depth=1 . | sort -hr'
+# Sécurité douce (n'affecte pas les scripts)
+alias rm='rm -i'
+alias cp='cp -i'
+alias mv='mv -i'
 
 # --- Sudo helpers
-alias please='sudo !!'
+please() { eval sudo "$(fc -ln -1)"; }
+# Espace final volontaire pour permettre l'expansion de l'alias suivant (ex: "pls ll")
 alias pls='sudo '
 alias sano='sudo -E nano'
 
-# --- APT (Debian) : raccourcis utiles
+# --- APT (Debian/Ubuntu) : raccourcis utiles, idempotents
 alias au='sudo apt update'
 alias aug='sudo apt update && sudo apt -y upgrade'
-alias asr='sudo apt search'
+alias asr='apt search'
 alias ain='sudo apt -y install'
 alias arm='sudo apt -y remove'
 alias apc='sudo apt -y autoremove && sudo apt -y autoclean'
 
-# --- Git : log lisible & raccourcis
+# --- Git : logs lisibles & raccourcis
 alias g='git'
 alias ga='git add'
 alias gb='git branch'
@@ -2253,116 +2370,72 @@ alias gpf='git push --force-with-lease'
 alias gpo='git push origin HEAD'
 alias grhh='git reset --hard HEAD'
 alias gundo='git reset --soft HEAD~1'
-if command -v delta >/dev/null 2>&1; then
-  git config --global core.pager delta
-elif command -v diff-so-fancy >/dev/null 2>&1; then
-  git config --global core.pager "diff-so-fancy | less --tabs=4 -RFX"
+alias gpr='git pull --rebase --autostash'
+
+# Configure le pager Git une seule fois si rien n'est déjà défini
+if command -v git >/dev/null 2>&1; then
+  if command -v delta >/dev/null 2>&1; then
+    git config --global --get core.pager >/dev/null 2>&1 || git config --global core.pager delta
+  elif command -v diff-so-fancy >/dev/null 2>&1; then
+    git config --global --get core.pager >/dev/null 2>&1 || git config --global core.pager "diff-so-fancy | less --tabs=4 -RFX"
+  fi
 fi
 
 # --- Réseaux / IP
-alias myip='curl -s https://ifconfig.me || dig +short myip.opendns.com @resolver1.opendns.com'
+alias myip='curl -s --max-time 2 https://ifconfig.me || dig +short myip.opendns.com @resolver1.opendns.com'
 alias ports='ss -tulpn'
 
-if [ -x /usr/bin/dircolors ]; then
-    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
-    alias ls='ls --color=auto'
-    alias grep='grep --color=auto'
-    alias fgrep='fgrep --color=auto'
-    alias egrep='egrep --color=auto'
-fi
-
-alias cd='odir=$(pwd); cd '
-alias bak='cd "$odir"'
-
-alias ls="ls --color=auto -hlaF"
-alias lsa="ls --color=auto -lhaF"
-alias lsd="ls --color=auto -lhaF"
-alias update="apt-get update && apt-get upgrade && apt-get dist-upgrade && apt-get autoclean && apt-get clean && apt-get autoremove && debclean"
-alias nano="nano -c "
-alias miseajour='apt-get update &&  apt-get upgrade -y &&  apt-get dist-upgrade -y &&   apt-get autoclean -y &&  apt-get clean -y &&  apt-get autoremove -y'
-# grc - Generic Colouriser (colorise les sorties de commandes)
-if command -v grc &>/dev/null; then
+# --- Aliases divers (optionnels si grc/yt-dlp présents)
+if command -v grc >/dev/null 2>&1; then
   alias tail='grc tail'
-  alias head='grc head'
-  alias cat='grc cat'
   alias ifconfig='grc ifconfig'
-  alias ip='grc ip'
-  alias ping='grc ping'
-  alias traceroute='grc traceroute'
-  alias netstat='grc netstat'
-  alias ss='grc ss'
-  alias ps='grc ps'
-  alias dig='grc dig'
-  alias df='grc df'
-  alias du='grc du'
-  alias free='grc free'
-  alias mount='grc mount'
-  alias env='grc env'
-  alias systemctl='grc systemctl'
-  alias journalctl='grc journalctl'
-  alias last='grc last'
-  alias lastlog='grc lastlog'
-  alias diff='grc diff'
-  alias make='grc make'
-  alias gcc='grc gcc'
-  alias g++='grc g++'
-  alias ld='grc ld'
-  alias lsblk='grc lsblk'
-  alias lsof='grc lsof'
-  alias lspci='grc lspci'
-  alias lsusb='grc lsusb'
-  alias uptime='grc uptime'
-  alias w='grc w'
-  alias who='grc who'
-  alias id='grc id'
-  alias fdisk='grc fdisk'
-  alias blkid='grc blkid'
-  alias nmap='grc nmap'
-  alias docker='grc docker'
-  alias docker-compose='grc docker-compose'
-  alias kubectl='grc kubectl'
-  alias apt='grc apt'
-  alias apt-get='grc apt-get'
-  alias dpkg='grc dpkg'
 fi
-alias zik='beep -f 1150 -n -f 1450 -n -f 1300 -l 300 -n -f 1150 -l 300 -n -f 1100 -l 300 -n -f 1150 -l 300 -n -f 850 -l 300'
+if command -v yt-dlp >/dev/null 2>&1; then
+  alias youtubedl="yt-dlp -f 'bestaudio' -o '%(artist)s - %(title)s.%(ext)s'"
+elif command -v youtube-dl >/dev/null 2>&1; then
+  alias youtubedl="youtube-dl -f 'bestaudio' -o '%(artist)s - %(title)s.%(ext)s'"
+fi
 
+# --- Symfony / PHP
 alias s='symfony '
 alias c='symfony console '
 alias fix='vendor/bin/php-cs-fixer fix src/ && vendor/bin/phpstan'
 
-alias venv='python3 -m venv /media/data/venv && source /media/data/venv/bin/activate'
+# --- Python venv helpers (plus robuste qu'un chemin codé en dur)
+mkvenv() {
+  local target="${1:-.venv}"
+  python3 -m venv "$target" && . "$target/bin/activate"
+}
+workon() {
+  [[ -d ".venv" ]] && . ".venv/bin/activate" || echo "No .venv found in current directory."
+}
 
-alias alert='notify-send --urgency=low -i "$([ $? = 0 ] && echo terminal || echo error)" "$(history|tail -n1|sed -e '\''s/^\s*[0-9]\+\s*//;s/[;&|]\s*alert$//'\'')"'
-
-alias youtubedl="youtube-dl -f 'bestaudio' -o '%(artist)s - %(title)s.%(ext)s' "
-
-if [ -f ~/.bash_aliases ]; then
-    . ~/.bash_aliases
-fi
+# --- Chargement des alias utilisateur
+[[ -f "$HOME/.bash_aliases" ]] && . "$HOME/.bash_aliases"
 
 # --- Fonctions utilitaires
 
+# man pages colorisées
 man() {
-    env \
-    LESS_TERMCAP_mb=$'\E[01;31m' \
-    LESS_TERMCAP_md=$'\E[01;31m' \
-    LESS_TERMCAP_me=$'\E[0m' \
-    LESS_TERMCAP_se=$'\E[0m' \
-    LESS_TERMCAP_so=$'\E[01;31m' \
-    LESS_TERMCAP_ue=$'\E[0m' \
-    LESS_TERMCAP_us=$'\E[01;32m' \
-    man "$@"
+  env \
+  LESS_TERMCAP_mb=$'\E[01;31m' \
+  LESS_TERMCAP_md=$'\E[01;31m' \
+  LESS_TERMCAP_me=$'\E[0m' \
+  LESS_TERMCAP_se=$'\E[0m' \
+  LESS_TERMCAP_so=$'\E[01;31m' \
+  LESS_TERMCAP_ue=$'\E[0m' \
+  LESS_TERMCAP_us=$'\E[01;32m' \
+  man "$@"
 }
 
-log() { echo -e "\e[32m$1\e[0m"; }
-error() { echo -e "\e[31m$1\e[0m" >&2; }
+log()   { printf "\e[32m%s\e[0m\n" "$1"; }
+error() { printf "\e[31m%s\e[0m\n" "$1" >&2; }
 
 mkcd () { mkdir -p -- "$1" && cd -- "$1"; }
 
-extract () {
+extract () { # Décompresse selon l'extension
   local f="$1"
-  [[ -f "$f" ]] || { echo "Fichier introuvable: $f"; return 1; }
+  [[ -f "$f" ]] || { echo "File not found: $f"; return 1; }
   case "$f" in
     *.tar.bz2)   tar xjf "$f"   ;;
     *.tar.gz)    tar xzf "$f"   ;;
@@ -2377,57 +2450,28 @@ extract () {
     *.gz)        gunzip "$f"    ;;
     *.bz2)       bunzip2 "$f"   ;;
     *.xz)        unxz "$f"      ;;
-    *)           echo "Format non supporté: $f" ; return 2 ;;
+    *)           echo "Unsupported archive format: $f" ; return 2 ;;
   esac
 }
 
-up () {
-  local d=""
-  local limit="${1:-1}"
+up () { # Remonte de N répertoires (1 par défaut)
+  local d="" limit="${1:-1}"
   for ((i=1; i<=limit; i++)); do d+="../"; done
   cd "$d" || return
 }
 
-timer () {
+timer () { # Chronomètre une commande
   local start end
   start=$(date +%s)
   "$@"
   end=$(date +%s)
-  echo "⏱  $(($end - $start))s"
+  echo "⏱  $(( end - start ))s"
 }
 
-_venv_name() {
-  if [[ -n "$VIRTUAL_ENV" ]]; then
-    basename "$VIRTUAL_ENV"
-  fi
-}
+# --- Prompt : couleurs + infos utiles, sans casser l'historique
 
-_git_branch() {
-  command -v git >/dev/null 2>&1 || return
-  git rev-parse --is-inside-work-tree &>/dev/null || return
-  local b; b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null) || return
-  local dirty=""
-  git diff --no-ext-diff --quiet --ignore-submodules --cached || dirty="*"
-  git diff --no-ext-diff --quiet --ignore-submodules || dirty="${dirty}+"
-  printf "%s%s" "$b" "$dirty"
-}
-
-_last_status_segment() {
-  local ec=$1
-  [[ $ec -eq 0 ]] && return
-  printf "✖ %d" "$ec"
-}
-
-__TIMER_START=0
-trap '__TIMER_START=$SECONDS' DEBUG
-_last_cmd_duration() {
-  local dur=$(( SECONDS - __TIMER_START ))
-  (( dur > 1 )) && printf "%ss" "$dur"
-}
-
-_supports_truecolor() { [[ "${COLORTERM:-}" =~ (24bit|truecolor) ]] && return 0 || return 1; }
-
-rgb() { printf "\e[38;2;%s;%s;%sm" "$1" "$2" "$3"; }
+# Helpers couleurs (gèrent le comptage de longueur grâce à \[ \])
+rgb()   { printf "\e[38;2;%s;%s;%sm" "$1" "$2" "$3"; }
 bgrgb() { printf "\e[48;2;%s;%s;%sm" "$1" "$2" "$3"; }
 reset="\[\e[0m\]"
 dim="\[\e[2m\]"
@@ -2438,6 +2482,8 @@ yellow="\[\e[1;33m\]"
 green="\[\e[0;32m\]"
 cyan="\[\e[36m\]"
 magenta="\[\e[35m\]"
+
+_supports_truecolor() { [[ "${COLORTERM:-}" =~ (24bit|truecolor) ]]; }
 
 if _supports_truecolor; then
   user_fg="\[$(rgb 110 210 65)\]"
@@ -2459,83 +2505,137 @@ else
   root_accent="\[\e[91m\]"
 fi
 
-sym_branch=""
-sym_time=""
-sym_kube="󱃾"
-sym_venv=""
-sym_host=""
-sym_user=""
-sym_root="󰌾"
-sym_sep=""
+sym_branch=""; sym_time=""; sym_kube="󱃾"; sym_venv=""; sym_host=""
+sym_user="";  sym_root="󰌾"; sym_sep=""
 
-emojis=(🐶 🐺 🐱 🐭 🐹 🐰 🐸 🐯 🐨 🐻 🐷 🐮 🐵 🐼 🐧 🐍 🐢 🐙 🐠 🐳 🐬 🐥 💩 👹 👺 💀 👻 👽 🤖 💩 🤯 🤩 😍 🧙‍♀️ 🐶 🐱 🐭 🐹 🐰 🦊  🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐽 🐸 🐵 🙈 🙉 🙊 🐒 🐔 🐧 🐦 🐤 🐣 🐥 🦆  🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐚 🐞 🐜 🦗 🦂 🐢 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦀 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🐘 🦏 🐪 🐫 🦒 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🐇 🐁 🐀 🦔 🐾🐉 🐲 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🎍 🎋 🍃 🍂 🍁 🍄 🌾 💐 🌷 🌹 🥀 🌺 🌸 🌼 🌻 🌞 🌝 🌈 🌈 🌈 🌈 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🎻 🎲 💊 🏴‍☠️ 🛰️ 🚀 🛸)
-emoji='`echo ${emojis[$RANDOM % 184]}`'
-emojicount=`echo $emoji | wc -c`
+# Tirage d'un emoji correct
+emojis=(🐶 🐺 🐱 🐭 🐹 🐰 🐸 🐯 🐨 🐻 🐷 🐮 🐵 🐼 🐧 🐍 🐢 🐙 🐠 🐳 🐬 🐥 💩 👹 👺 💀 👻 👽 🤖 💩 🤯 🤩 😍 🧙‍♀️ 🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐽 🐸 🐵 🙈 🙉 🙊 🐒 🐔 🐧 🐦 🐤 🐣 🐥 🦆 🦅 🦉 🦇 🐺 🐗 🐴 🦄 🐝 🐛 🦋 🐌 🐚 🐞 🐜 🦗 🦂 🐢 🐍 🦎 🦖 🦕 🐙 🦑 🦐 🦀 🐡 🐠 🐟 🐬 🐳 🐋 🦈 🐊 🐅 🐆 🦓 🦍 🐘 🦏 🐪 🐫 🦒 🐃 🐂 🐄 🐎 🐖 🐏 🐑 🐐 🦌 🐕 🐩 🐈 🐓 🦃 🐇 🐁 🐀 🦔 🐾 🐉 🐲 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🎍 🎋 🍃 🍂 🍁 🍄 🌾 💐 🌷 🌹 🥀 🌺 🌸 🌼 🌻 🌞 🌝 🌈 🎤 🎧 🎼 🎹 🥁 🎷 🎺 🎸 🎻 🎲 💊 🏴‍☠️ 🛰️ 🚀 🛸)
+emoji="${emojis[RANDOM % ${#emojis[@]}]}"
 
-_prompt_build() {
+_venv_name() {
+  [[ -n "$VIRTUAL_ENV" ]] && basename "$VIRTUAL_ENV"
+}
+_git_branch() {
+  command -v git >/dev/null 2>&1 || return
+  git rev-parse --is-inside-work-tree &>/dev/null || return
+  local b dirty=""
+  b=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || git rev-parse --short HEAD 2>/dev/null) || return
+  git diff --no-ext-diff --quiet --ignore-submodules --cached || dirty="*"
+  git diff --no-ext-diff --quiet --ignore-submodules || dirty="${dirty}+"
+  printf "%s%s" "$b" "$dirty"
+}
+_last_status_segment() {
+  local ec=$1
+  [[ $ec -eq 0 ]] && return
+  printf "✖ %d" "$ec"
+}
+
+# Chrono de la dernière commande
+__TIMER_START=0
+# Le trap DEBUG ne doit PAS se déclencher pendant PROMPT_COMMAND
+trap '[[ -z "${__PROMPT_RUNNING:-}" ]] && __TIMER_START=$SECONDS' DEBUG
+_last_cmd_duration() {
+  local dur=$(( $1 - __TIMER_START ))
+  (( dur > 1 )) && printf "%ss" "$dur"
+}
+
+# Historique partagé sans flush coûteux (pas de 'history -c; history -r' à chaque prompt)
+__history_sync() {
+  builtin history -a    # append new lines from this session
+  builtin history -n    # read new lines from other sessions
+}
+
+# Wrapper PROMPT_COMMAND : capture $? et SECONDS AVANT toute autre action
+__prompt_command() {
   local exit_code=$?
+  local cmd_end=$SECONDS
+  __PROMPT_RUNNING=1
+  __history_sync
+  __prompt_build "$exit_code" "$cmd_end"
+  unset __PROMPT_RUNNING
+}
+
+__prompt_build() {
+  local exit_code=${1:-0}
+  local cmd_end=${2:-$SECONDS}
   local userpart hostpart git venv dur err
 
   if [[ $EUID -eq 0 ]]; then
-    userpart="${root_fg}${bold}󰌾 root${reset}"
-    hostpart="${root_accent}${magenta} \h${reset}"
+    userpart="${root_fg}${bold}${sym_root} root${reset}"
+    hostpart="${root_accent}${yellow} ${sym_host} \h${reset}"
   else
-    userpart="${user_fg}${bold} \u${reset}"
-    hostpart="${user_accent}${magenta} \h${reset}"
+    userpart="${user_fg}${bold}${sym_user} \u${reset}"
+    hostpart="${user_accent}${yellow} ${sym_host} \h${reset}"
   fi
 
   local gb; gb=$(_git_branch)
-  [[ -n "$gb" ]] && git=" ${git_fg} ${gb}${reset}"
+  [[ -n "$gb" ]] && git=" ${git_fg}${sym_branch} ${gb}${reset}"
 
   local vn; vn=$(_venv_name)
-  [[ -n "$vn" ]] && venv=" ${time_fg} ${vn}${reset}"
+  [[ -n "$vn" ]] && venv=" ${time_fg}${sym_venv} ${vn}${reset}"
 
-  dur=$(_last_cmd_duration)
-  [[ -n "$dur" ]] && dur=" ${time_fg} ${dur}${reset}"
+  dur=$(_last_cmd_duration "$cmd_end")
+  [[ -n "$dur" ]] && dur=" ${time_fg}${sym_time} ${dur}${reset}"
   local st; st=$(_last_status_segment "$exit_code")
   [[ -n "$st" ]] && err=" ${err_bg} ${st} ${reset}"
 
   local line1="${userpart} at ${hostpart}${git}${venv}${dur}${err}\n"
   local pathpart="${bold}${blue}\w${reset}"
   local chevron; if [[ $EUID -eq 0 ]]; then chevron="${root_fg}#${reset}"; else chevron="${user_fg}\$${reset}"; fi
-  PS1="\n$emoji \[\e[0;36m\][\t]\[\e[0;m\] ${line1}${pathpart} ${chevron} "
+  PS1="\n${emoji} \[\e[0;36m\][\t]\[\e[0;m\] ${line1}${pathpart} ${chevron} "
 }
 
-PROMPT_COMMAND="_prompt_build"
+# Compose PROMPT_COMMAND (idempotent au re-source)
+__install_prompt_command() {
+  [[ "${PROMPT_COMMAND:-}" == *"__prompt_command"* ]] && return
+  if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare \-a'; then
+    PROMPT_COMMAND+=(__prompt_command)
+  elif [[ -n "${PROMPT_COMMAND:-}" ]]; then
+    PROMPT_COMMAND="__prompt_command; ${PROMPT_COMMAND}"
+  else
+    PROMPT_COMMAND="__prompt_command"
+  fi
+}
+__install_prompt_command
 
+# --- Completions
 if [[ -r /usr/share/bash-completion/bash_completion ]]; then
   . /usr/share/bash-completion/bash_completion
 elif [[ -r /etc/bash_completion ]]; then
   . /etc/bash_completion
 fi
-
 if declare -F _git >/dev/null 2>&1; then
   complete -o default -o nospace -F _git g
 fi
-
 command -v composer >/dev/null 2>&1 && eval "$(composer completion bash 2>/dev/null)" || true
-command -v symfony  >/dev/null 2>&1 && eval "$(symfony completion bash 2>/dev/null)" || true
+command -v symfony  >/dev/null 2>&1 && eval "$(symfony  completion bash 2>/dev/null)" || true
+[[ -f "$HOME/.fzf.bash" ]] && . "$HOME/.fzf.bash"
 
-# Banner hostname avec toilet/figlet + infos système
-hostname_banner() {
-  local host=$(hostname -s)
-  if command -v toilet &>/dev/null; then
+# --- GPG TTY (utile pour les commits signés)
+command -v gpg >/dev/null 2>&1 && export GPG_TTY="$(tty)"
+
+# --- Banner hostname avec toilet/figlet + infos système (une seule fois par session)
+__motd_once() {
+  [[ -n "${BASHRC_MOTD_SHOWN:-}" ]] && return
+  [[ -t 1 ]] || return
+  local host
+  host=$(hostname -s)
+  if command -v toilet >/dev/null 2>&1; then
     toilet -f smblock --filter border "$host" 2>/dev/null | lolcat 2>/dev/null || toilet -f smblock "$host" 2>/dev/null
-  elif command -v figlet &>/dev/null; then
+  elif command -v figlet >/dev/null 2>&1; then
     figlet -f small "$host" 2>/dev/null | lolcat 2>/dev/null || figlet -f small "$host" 2>/dev/null
   else
     echo -e "\n  \e[1;35m>>> $host <<<\e[0m\n"
   fi
-}
-hostname_banner 2>/dev/null
-
-# Infos système rapides
-system_info() {
-  if command -v fastfetch &>/dev/null; then
+  if command -v fastfetch >/dev/null 2>&1; then
     fastfetch --logo none --structure OS:Kernel:Uptime:Memory 2>/dev/null
   fi
+  export BASHRC_MOTD_SHOWN=1
 }
-system_info 2>/dev/null || true
+__motd_once || true
+
+# Source cargo/rustup si présent
+[[ -f "$HOME/.cargo/env" ]] && . "$HOME/.cargo/env"
 BASHRC
   }
 
@@ -4442,11 +4542,23 @@ done
 CRON_AUDIT="0 7 * * 1 ${INSTALL_SCRIPT_PATH} --audit >/dev/null 2>&1"
 
 EXISTING_CRON=$(crontab -l 2>/dev/null || true)
-# Supprimer les anciennes entrées audit
-EXISTING_CRON=$(echo "$EXISTING_CRON" | grep -v "\-\-audit" || true)
-if ! echo "$EXISTING_CRON" | grep -q "${INSTALL_SCRIPT_PATH}.*audit"; then
-  (echo "$EXISTING_CRON"; echo "# Audit de sécurité hebdomadaire (lundi 7h00)"; echo "$CRON_AUDIT") | crontab -
-  log "Cron audit configuré → ${INSTALL_SCRIPT_PATH} --audit"
+# Supprimer les anciennes entrées audit — idempotent
+CLEANED_CRON=$(echo "$EXISTING_CRON" | grep -v "\-\-audit" | grep -v "# Audit de sécurité" || true)
+echo -e "${CLEANED_CRON}\n# Audit de sécurité hebdomadaire (lundi 7h00)\n${CRON_AUDIT}" | grep -v '^$' | crontab -
+log "Cron audit configuré → ${INSTALL_SCRIPT_PATH} --audit"
+
+# Attendre la fin de l'initialisation AIDE si lancée en arrière-plan
+if [[ -n "${AIDE_PID:-}" ]]; then
+  log "Attente de la fin de l'initialisation AIDE (PID ${AIDE_PID})..."
+  if wait "$AIDE_PID" 2>/dev/null; then
+    # Renommer la base AIDE si aideinit a réussi
+    if [[ -f /var/lib/aide/aide.db.new ]]; then
+      mv /var/lib/aide/aide.db.new /var/lib/aide/aide.db
+      log "Base AIDE initialisée avec succès."
+    fi
+  else
+    warn "L'initialisation AIDE a échoué (exit code $?). Relancez 'aideinit' manuellement."
+  fi
 fi
 
 log "Terminé. Garde une session SSH ouverte tant que tu n'as pas validé la nouvelle connexion sur le port ${SSH_PORT}."
