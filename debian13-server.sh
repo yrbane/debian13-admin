@@ -68,6 +68,8 @@ source "${LIB_DIR}/config.sh"
 source "${LIB_DIR}/ovh-api.sh"
 # shellcheck source=lib/domain-manager.sh
 source "${LIB_DIR}/domain-manager.sh"
+# shellcheck source=lib/backup.sh
+source "${LIB_DIR}/backup.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -102,6 +104,8 @@ show_help() {
   printf "  ${GREEN}--domain-check [dom]${RESET}      Vérifier la configuration d'un domaine (DNS, DKIM,\n"
   printf "                            SPF, DMARC, SSL, VHost). Sans argument : vérifie\n"
   printf "                            tous les domaines enregistrés.\n"
+  printf "  ${GREEN}--backup${RESET}                  Sauvegarde complète (configs, DKIM, MariaDB, cron).\n"
+  printf "  ${GREEN}--backup-list${RESET}             Lister les sauvegardes disponibles.\n"
   printf "\n"
 
   printf "${BOLD}${MAGENTA}PARAMÈTRES${RESET} (mode interactif, sinon valeurs par défaut) :\n"
@@ -182,6 +186,8 @@ DOMAIN_REMOVE=""
 DOMAIN_LIST_MODE=false
 DOMAIN_CHECK=""
 DOMAIN_CHECK_ALL=false
+BACKUP_MODE=false
+BACKUP_LIST_MODE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -202,6 +208,8 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$DOMAIN_REMOVE" ]] && die "--domain-remove nécessite un nom de domaine."
       ;;
     --domain-list) DOMAIN_LIST_MODE=true ;;
+    --backup) BACKUP_MODE=true ;;
+    --backup-list) BACKUP_LIST_MODE=true ;;
     --domain-check)
       if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
         shift; DOMAIN_CHECK="$1"
@@ -641,6 +649,20 @@ OVHCREDS
   exit 0
 fi
 
+# ================================== MODE --backup =====================================
+
+if $BACKUP_LIST_MODE; then
+  section "Sauvegardes disponibles"
+  backup_list
+  exit 0
+fi
+
+if $BACKUP_MODE; then
+  section "Sauvegarde complète"
+  backup_full
+  exit 0
+fi
+
 # ================================== MODES --domain-* ==================================
 
 # --- --domain-list ---
@@ -1043,6 +1065,13 @@ print_note "Vérifier un domaine :"
 print_cmd "sudo ${0} --domain-check example.com"
 print_note "Supprimer un domaine :"
 print_cmd "sudo ${0} --domain-remove example.com"
+echo ""
+
+print_title "Sauvegarde"
+print_note "Sauvegarde complète (configs, DKIM, MariaDB, cron) :"
+print_cmd "sudo ${0} --backup"
+print_note "Lister les sauvegardes :"
+print_cmd "sudo ${0} --backup-list"
 echo ""
 
 print_dns_actions
