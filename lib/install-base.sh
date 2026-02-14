@@ -98,6 +98,11 @@ if $INSTALL_UFW; then
   yes | ufw enable || true
   ufw status verbose
   log "UFW activé. Ports ouverts: ${SSH_PORT}/80/443."
+
+  # Filtrage egress (optionnel)
+  if $EGRESS_FILTER; then
+    deploy_egress_rules
+  fi
 fi
 
 # ---------------------------------- 3b) GeoIP Block ------------------------------------

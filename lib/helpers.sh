@@ -354,3 +354,26 @@ EOF
 
   log "auditd: règles de hardening déployées"
 }
+
+# ---------------------------------- Egress filtering ---------------------------------
+
+# Configurer le filtrage sortant UFW (deny par défaut + whitelist)
+deploy_egress_rules() {
+  ufw default deny outgoing
+
+  # DNS
+  ufw allow out 53 comment "DNS"
+  # HTTP/HTTPS (apt, certbot, API calls)
+  ufw allow out 80/tcp comment "HTTP out"
+  ufw allow out 443/tcp comment "HTTPS out"
+  # SMTP
+  ufw allow out 25/tcp comment "SMTP"
+  ufw allow out 587/tcp comment "SMTP submission"
+  ufw allow out 465/tcp comment "SMTPS"
+  # NTP
+  ufw allow out 123/udp comment "NTP"
+  # Whois (certbot, DNS checks)
+  ufw allow out 43/tcp comment "WHOIS"
+
+  log "UFW: filtrage egress activé (deny par défaut + whitelist)"
+}

@@ -1280,3 +1280,19 @@ verify_auditd() {
 
   emit_section_close
 }
+
+# ---------------------------------- Egress filtering --------------------------------
+verify_egress() {
+  emit_section "Filtrage sortant"
+
+  local ufw_out
+  ufw_out=$(ufw status verbose 2>/dev/null) || { emit_check warn "UFW : impossible d'obtenir le statut"; emit_section_close; return; }
+
+  if echo "$ufw_out" | grep -q "deny (outgoing)"; then
+    emit_check ok "UFW egress : filtrage sortant actif (deny par défaut)"
+  else
+    emit_check warn "UFW egress : trafic sortant non filtré (allow par défaut)"
+  fi
+
+  emit_section_close
+}
