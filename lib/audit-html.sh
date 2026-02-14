@@ -310,8 +310,7 @@ PROGHTML
 
     if [[ -f "$ACCESS_LOG" ]]; then
       # Cache : extraire les lignes des 24h une seule fois (évite 7+ grep sur access.log)
-      local ACCESS_24H
-      ACCESS_24H=$(mktemp)
+      ACCESS_24H=$(mktempfile .access24h)
       grep -E "\[${AUDIT_TODAY}|\[${AUDIT_YESTERDAY}" "$ACCESS_LOG" > "$ACCESS_24H" 2>/dev/null || true
 
       # Stats générales depuis le cache
