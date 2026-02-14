@@ -280,6 +280,39 @@ verify_web() {
         emit_check warn "SSL : hook de renouvellement Apache absent"
       fi
 
+      # VirtualHosts
+      if [[ -f "/etc/apache2/sites-enabled/010-${HOSTNAME_FQDN}.conf" ]]; then
+        emit_check ok "VHost : 010-${HOSTNAME_FQDN}.conf activé"
+      else
+        emit_check warn "VHost : 010-${HOSTNAME_FQDN}.conf non activé"
+      fi
+
+      # DocumentRoot
+      if [[ -d "/var/www/${HOSTNAME_FQDN}/www/public" ]]; then
+        emit_check ok "VHost : DocumentRoot /var/www/${HOSTNAME_FQDN}/www/public existe"
+      else
+        emit_check warn "VHost : DocumentRoot /var/www/${HOSTNAME_FQDN}/www/public absent"
+      fi
+
+      # Page de parking
+      if [[ -f "/var/www/${HOSTNAME_FQDN}/www/public/index.html" ]]; then
+        emit_check ok "Parking : page index.html déployée"
+      else
+        emit_check warn "Parking : page index.html absente"
+      fi
+
+      # Pages d'erreur WebGL
+      if [[ -f "${ERROR_PAGES_DIR}/error.php" ]]; then
+        emit_check ok "Error pages : error.php WebGL déployé"
+      else
+        emit_check warn "Error pages : error.php non trouvé dans ${ERROR_PAGES_DIR}"
+      fi
+      if [[ -f "${ERROR_PAGES_DIR}/css/error.css" ]]; then
+        emit_check ok "Error pages : CSS déployé"
+      else
+        emit_check warn "Error pages : CSS absent"
+      fi
+
       # Credentials OVH (pour wildcard)
       if $CERTBOT_WILDCARD; then
         if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then

@@ -81,6 +81,7 @@ show_help() {
   printf "  ${GREEN}--noninteractive${RESET}    N'affiche pas les questions ; utilise les valeurs par défaut.\n"
   printf "  ${GREEN}--audit${RESET}             Vérifications + rapport email, sans installation.\n"
   printf "  ${GREEN}--check-dns${RESET}         Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
+  printf "  ${GREEN}--fix${RESET}               Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
   printf "  ${GREEN}--renew-ovh${RESET}         Regénérer les credentials API OVH (certificat wildcard).\n"
   printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}          Affiche cette aide.\n"
   printf "\n"
@@ -129,6 +130,7 @@ show_help() {
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --noninteractive${RESET}  # Valeurs par défaut\n"
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --audit${RESET}           # Audit uniquement\n"
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns${RESET}       # Vérification DNS/DKIM\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns --fix${RESET} # Vérification + correction auto DNS\n"
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --renew-ovh${RESET}       # Regénérer credentials OVH\n"
   printf "\n"
 }
@@ -138,17 +140,24 @@ NONINTERACTIVE=false
 AUDIT_MODE=false
 CHECK_DNS_MODE=false
 RENEW_OVH_MODE=false
+FIX_DNS=false
 PIPED_MODE=false
 for arg in "$@"; do
   case "$arg" in
     --noninteractive) NONINTERACTIVE=true ;;
     --audit) AUDIT_MODE=true ;;
     --check-dns) CHECK_DNS_MODE=true ;;
+    --fix) FIX_DNS=true ;;
     --renew-ovh) RENEW_OVH_MODE=true ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $arg"; show_help; exit 1 ;;
   esac
 done
+
+# Validation : --fix nécessite --check-dns
+if $FIX_DNS && ! $CHECK_DNS_MODE; then
+  die "--fix nécessite --check-dns. Usage : sudo $0 --check-dns --fix"
+fi
 
 # Détection exécution via pipe (curl | bash)
 if [[ ! -t 0 ]]; then
@@ -376,6 +385,176 @@ print_dns_actions() {
   echo ""
 }
 
+# ---------------------------------- Correction DNS automatique -------------------------
+fix_dns() {
+  local fix_ok=0 fix_fail=0
+  local subdomain=""
+
+  # Extraire le sous-domaine : si HOSTNAME_FQDN=srv.example.com et BASE_DOMAIN=example.com → subdomain=srv
+  if [[ "$HOSTNAME_FQDN" != "$BASE_DOMAIN" ]]; then
+    subdomain="${HOSTNAME_FQDN%%."$BASE_DOMAIN"}"
+  fi
+
+  # --- A record ---
+  if [[ "${DNS_A:-}" != "${SERVER_IP:-}" ]]; then
+    log "DNS fix : A ${HOSTNAME_FQDN} → ${SERVER_IP}"
+    local rid
+    rid=$(ovh_dns_find "$BASE_DOMAIN" "$subdomain" "A" 2>/dev/null) || rid=""
+    if [[ -n "$rid" ]]; then
+      if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP}\"" 2>/dev/null; then
+        log "DNS fix : A record OK"; ((++fix_ok))
+      else
+        warn "DNS fix : A record échoué"; ((++fix_fail))
+      fi
+    else
+      if ovh_dns_create "$BASE_DOMAIN" "$subdomain" "A" "\"${SERVER_IP}\"" 2>/dev/null; then
+        log "DNS fix : A record créé OK"; ((++fix_ok))
+      else
+        warn "DNS fix : A record création échouée"; ((++fix_fail))
+      fi
+    fi
+  fi
+
+  # --- www A record ---
+  if [[ "${DNS_WWW:-}" != "${SERVER_IP:-}" ]]; then
+    log "DNS fix : A www.${HOSTNAME_FQDN} → ${SERVER_IP}"
+    local www_sub="www"
+    [[ -n "$subdomain" ]] && www_sub="www.${subdomain}"
+    local rid
+    rid=$(ovh_dns_find "$BASE_DOMAIN" "$www_sub" "A" 2>/dev/null) || rid=""
+    if [[ -n "$rid" ]]; then
+      if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP}\"" 2>/dev/null; then
+        log "DNS fix : www A record OK"; ((++fix_ok))
+      else
+        warn "DNS fix : www A record échoué"; ((++fix_fail))
+      fi
+    else
+      if ovh_dns_create "$BASE_DOMAIN" "$www_sub" "A" "\"${SERVER_IP}\"" 2>/dev/null; then
+        log "DNS fix : www A record créé OK"; ((++fix_ok))
+      else
+        warn "DNS fix : www A record création échouée"; ((++fix_fail))
+      fi
+    fi
+  fi
+
+  # --- AAAA record (IPv6) ---
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    if [[ "${DNS_AAAA:-}" != "${SERVER_IP6}" ]]; then
+      log "DNS fix : AAAA ${HOSTNAME_FQDN} → ${SERVER_IP6}"
+      local rid
+      rid=$(ovh_dns_find "$BASE_DOMAIN" "$subdomain" "AAAA" 2>/dev/null) || rid=""
+      if [[ -n "$rid" ]]; then
+        if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP6}\"" 2>/dev/null; then
+          log "DNS fix : AAAA record OK"; ((++fix_ok))
+        else
+          warn "DNS fix : AAAA record échoué"; ((++fix_fail))
+        fi
+      else
+        if ovh_dns_create "$BASE_DOMAIN" "$subdomain" "AAAA" "\"${SERVER_IP6}\"" 2>/dev/null; then
+          log "DNS fix : AAAA record créé OK"; ((++fix_ok))
+        else
+          warn "DNS fix : AAAA record création échouée"; ((++fix_fail))
+        fi
+      fi
+    fi
+
+    # --- www AAAA record ---
+    if [[ "${DNS_WWW6:-}" != "${SERVER_IP6}" ]]; then
+      log "DNS fix : AAAA www.${HOSTNAME_FQDN} → ${SERVER_IP6}"
+      local www_sub="www"
+      [[ -n "$subdomain" ]] && www_sub="www.${subdomain}"
+      local rid
+      rid=$(ovh_dns_find "$BASE_DOMAIN" "$www_sub" "AAAA" 2>/dev/null) || rid=""
+      if [[ -n "$rid" ]]; then
+        if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP6}\"" 2>/dev/null; then
+          log "DNS fix : www AAAA record OK"; ((++fix_ok))
+        else
+          warn "DNS fix : www AAAA record échoué"; ((++fix_fail))
+        fi
+      else
+        if ovh_dns_create "$BASE_DOMAIN" "$www_sub" "AAAA" "\"${SERVER_IP6}\"" 2>/dev/null; then
+          log "DNS fix : www AAAA record créé OK"; ((++fix_ok))
+        else
+          warn "DNS fix : www AAAA record création échouée"; ((++fix_fail))
+        fi
+      fi
+    fi
+  fi
+
+  # --- MX : ne pas toucher (géré par OVH MX Plan) ---
+  if [[ -z "${DNS_MX:-}" ]]; then
+    note "DNS fix : MX non configuré — géré par OVH (MX Plan), pas de correction automatique."
+  fi
+
+  # --- SPF ---
+  if [[ -z "${DNS_SPF:-}" ]]; then
+    log "DNS fix : SPF ${BASE_DOMAIN}"
+    if ovh_setup_spf "$BASE_DOMAIN" "$SERVER_IP" 2>/dev/null; then
+      log "DNS fix : SPF OK"; ((++fix_ok))
+    else
+      warn "DNS fix : SPF échoué"; ((++fix_fail))
+    fi
+  fi
+
+  # --- DKIM ---
+  if [[ -z "${DNS_DKIM:-}" || "${DNS_DKIM:-}" != *"v=DKIM1"* ]]; then
+    if [[ -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" ]]; then
+      log "DNS fix : DKIM ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}"
+      if ovh_setup_dkim "$BASE_DOMAIN" "$DKIM_SELECTOR" "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null; then
+        log "DNS fix : DKIM OK"; ((++fix_ok))
+      else
+        warn "DNS fix : DKIM échoué"; ((++fix_fail))
+      fi
+    else
+      warn "DNS fix : DKIM ignoré — fichier clé ${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt introuvable"
+    fi
+  fi
+
+  # --- DMARC ---
+  if [[ -z "${DNS_DMARC:-}" || "${DNS_DMARC:-}" == *"p=none"* ]]; then
+    log "DNS fix : DMARC _dmarc.${BASE_DOMAIN}"
+    if ovh_setup_dmarc "$BASE_DOMAIN" "$EMAIL_FOR_CERTBOT" 2>/dev/null; then
+      log "DNS fix : DMARC OK"; ((++fix_ok))
+    else
+      warn "DNS fix : DMARC échoué"; ((++fix_fail))
+    fi
+  fi
+
+  # --- PTR IPv4 ---
+  if [[ -n "${SERVER_IP:-}" && "${DNS_PTR:-}" != "$HOSTNAME_FQDN" ]]; then
+    log "DNS fix : PTR IPv4 ${SERVER_IP} → ${HOSTNAME_FQDN}"
+    if ovh_ip_reverse_set "$SERVER_IP" "$HOSTNAME_FQDN" 2>/dev/null; then
+      log "DNS fix : PTR IPv4 OK"; ((++fix_ok))
+    else
+      warn "DNS fix : PTR IPv4 échoué"; ((++fix_fail))
+    fi
+  fi
+
+  # --- PTR IPv6 ---
+  if [[ -n "${SERVER_IP6:-}" && "${DNS_PTR6:-}" != "$HOSTNAME_FQDN" ]]; then
+    log "DNS fix : PTR IPv6 ${SERVER_IP6} → ${HOSTNAME_FQDN}"
+    if ovh_ip_reverse_set "$SERVER_IP6" "$HOSTNAME_FQDN" 2>/dev/null; then
+      log "DNS fix : PTR IPv6 OK"; ((++fix_ok))
+    else
+      warn "DNS fix : PTR IPv6 échoué"; ((++fix_fail))
+    fi
+  fi
+
+  # --- CAA ---
+  if [[ -z "${DNS_CAA:-}" ]]; then
+    log "DNS fix : CAA ${BASE_DOMAIN} → letsencrypt.org"
+    if ovh_dns_create "$BASE_DOMAIN" "" "CAA" "\"0 issue \\\"letsencrypt.org\\\"\"" 2>/dev/null; then
+      log "DNS fix : CAA OK"; ((++fix_ok))
+    else
+      warn "DNS fix : CAA échoué"; ((++fix_fail))
+    fi
+  fi
+
+  echo ""
+  printf "${BOLD}  Corrections : ${GREEN}%d réussie(s)${RESET} | ${RED}%d échouée(s)${RESET}\n" "$fix_ok" "$fix_fail"
+  echo ""
+}
+
 # ================================== MODE --check-dns ==================================
 if $CHECK_DNS_MODE; then
   CHECK_MODE="cli"
@@ -386,6 +565,41 @@ if $CHECK_DNS_MODE; then
   printf "${BOLD}  Résultat : ${GREEN}%d OK${RESET} | ${YELLOW}%d avertissements${RESET} | ${RED}%d erreurs${RESET}\n" "$CHECKS_OK" "$CHECKS_WARN" "$CHECKS_FAIL"
   printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
   echo ""
+
+  if $FIX_DNS; then
+    section "Correction automatique DNS via API OVH"
+
+    # Vérifier les credentials OVH
+    note "Vérification des credentials OVH..."
+    _OVH_AK="" _OVH_AS="" _OVH_CK=""
+    if ! ovh_test_credentials 2>/dev/null; then
+      die "Credentials OVH invalides ou absents. Lancez --renew-ovh pour les configurer."
+    fi
+    log "Credentials OVH valides."
+    echo ""
+
+    # Corriger les enregistrements DNS
+    fix_dns
+
+    # Appliquer les changements de zone
+    note "Application des changements de zone DNS..."
+    ovh_dns_refresh "$BASE_DOMAIN" 2>/dev/null || warn "Impossible de rafraîchir la zone ${BASE_DOMAIN}"
+
+    # Pause propagation
+    note "Attente de 10 secondes pour la propagation DNS..."
+    sleep 10
+
+    # Re-vérification
+    section "Vérification post-correction"
+    CHECKS_OK=0; CHECKS_WARN=0; CHECKS_FAIL=0
+    verify_dns
+    echo ""
+    printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+    printf "${BOLD}  Résultat post-fix : ${GREEN}%d OK${RESET} | ${YELLOW}%d avertissements${RESET} | ${RED}%d erreurs${RESET}\n" "$CHECKS_OK" "$CHECKS_WARN" "$CHECKS_FAIL"
+    printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+    echo ""
+  fi
+
   print_dns_actions
   exit 0
 fi
@@ -717,6 +931,21 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
 fi
 print_cmd "logrotate --debug /etc/logrotate.d/custom-bootstrap"
 echo ""
+
+if $INSTALL_APACHE_PHP; then
+  print_title "VirtualHosts HTTPS"
+  print_note "Apex      : https://${HOSTNAME_FQDN}  →  /var/www/${HOSTNAME_FQDN}/www/public"
+  print_note "Wildcard  : https://*.${HOSTNAME_FQDN} →  /var/www/${HOSTNAME_FQDN}/{sub}/public"
+  print_note "www       : https://www.${HOSTNAME_FQDN} → 301 → https://${HOSTNAME_FQDN}"
+  print_note "HTTP      : http://${HOSTNAME_FQDN}    → 301 → https://${HOSTNAME_FQDN}"
+  echo ""
+  print_note "Ajouter un sous-domaine (ex: app) :"
+  print_cmd "mkdir -p /var/www/${HOSTNAME_FQDN}/app/public && chown -R www-data:www-data /var/www/${HOSTNAME_FQDN}/app"
+  echo ""
+  print_note "Pages d'erreur : ${ERROR_PAGES_DIR}/ (WebGL 3D, debug pour IPs de confiance)"
+  print_note "Logs VHost     : /var/log/apache2/${HOSTNAME_FQDN}/"
+  echo ""
+fi
 
 print_dns_actions
 

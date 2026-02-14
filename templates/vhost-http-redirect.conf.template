@@ -1,0 +1,26 @@
+# VirtualHost HTTP → HTTPS redirect (port 80)
+# Deployed by debian13-server.sh — Do not edit manually
+<VirtualHost *:80>
+    ServerName __HOSTNAME_FQDN__
+    ServerAlias www.__HOSTNAME_FQDN__ *.__HOSTNAME_FQDN__
+
+    # Anti-indexation
+    Header always set X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+
+    # Allow ACME challenges (certbot HTTP-01)
+    Alias /.well-known/acme-challenge/ /var/www/html/.well-known/acme-challenge/
+    <Directory /var/www/html/.well-known/acme-challenge/>
+        Options None
+        AllowOverride None
+        Require all granted
+    </Directory>
+
+    # Redirect everything else to HTTPS
+    RewriteEngine On
+    RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/ [NC]
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}$1 [R=301,L]
+
+    # Logs
+    ErrorLog  /var/log/apache2/__HOSTNAME_FQDN__/redirect-error.log
+    CustomLog /var/log/apache2/__HOSTNAME_FQDN__/redirect-access.log combined
+</VirtualHost>

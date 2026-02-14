@@ -1,0 +1,95 @@
+/* Parking page — dark theme with WebGL background
+ * Deployed by debian13-server.sh — Do not edit manually */
+
+:root {
+    --bg-dark: #0a0a1a;
+    --bg-mid: #142136;
+    --bg-deep: #0d1b2a;
+    --text-primary: #f1f5f9;
+    --text-muted: #94a3b8;
+    --accent-cyan: #6bdbdb;
+    --accent-orange: #dc5c3b;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-mid) 50%, var(--bg-deep) 100%);
+    color: var(--text-primary);
+}
+
+/* Three.js canvas */
+#parking-canvas {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    z-index: 0;
+}
+
+/* Content overlay */
+.overlay {
+    position: relative;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 2rem;
+    pointer-events: none;
+    text-align: center;
+}
+
+.domain-title {
+    font-size: 3rem;
+    font-weight: 800;
+    color: var(--accent-cyan);
+    text-shadow: 0 0 30px rgba(107, 219, 219, 0.5),
+                 0 0 60px rgba(107, 219, 219, 0.2);
+    margin-bottom: 1rem;
+    letter-spacing: 0.05em;
+}
+
+.subtitle {
+    font-size: 1.25rem;
+    color: var(--text-muted);
+    font-weight: 300;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+}
+
+/* CSS fallback animation (no WebGL) */
+.no-webgl .domain-title {
+    animation: glow-pulse 3s ease-in-out infinite;
+}
+
+@keyframes glow-pulse {
+    0%, 100% {
+        text-shadow: 0 0 30px rgba(107, 219, 219, 0.5),
+                     0 0 60px rgba(107, 219, 219, 0.2);
+    }
+    50% {
+        text-shadow: 0 0 50px rgba(107, 219, 219, 0.8),
+                     0 0 100px rgba(107, 219, 219, 0.4),
+                     0 0 150px rgba(107, 219, 219, 0.1);
+    }
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+    .domain-title { font-size: 2rem; }
+    .subtitle { font-size: 1rem; }
+}
+
+@media (max-width: 480px) {
+    .domain-title { font-size: 1.5rem; }
+    .subtitle { font-size: 0.85rem; }
+    .overlay { padding: 1rem; }
+}

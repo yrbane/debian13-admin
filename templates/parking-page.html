@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>__HOSTNAME_FQDN__</title>
+    <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+    <canvas id="parking-canvas"></canvas>
+
+    <div class="overlay">
+        <h1 class="domain-title">__HOSTNAME_FQDN__</h1>
+        <p class="subtitle">En construction</p>
+    </div>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.175.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.175.0/examples/jsm/"
+        }
+    }
+    </script>
+    <script type="module">
+    import * as THREE from 'three';
+    import { FontLoader } from 'three/addons/loaders/FontLoader.js';
+    import { TextGeometry } from 'three/addons/geometries/TextGeometry.js';
+
+    const canvas = document.getElementById('parking-canvas');
+    const domainName = '__HOSTNAME_FQDN__';
+
+    // Detect WebGL
+    let renderer;
+    try {
+        renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+    } catch (e) {
+        document.body.classList.add('no-webgl');
+        throw e;
+    }
+
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x0a0a1a, 1);
+
+    const scene = new THREE.Scene();
+    scene.fog = new THREE.FogExp2(0x0a0a1a, 0.008);
+
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 0, 12);
+
+    // Ambient
+    scene.add(new THREE.AmbientLight(0x142136, 0.4));
+
+    // Two orbiting point lights (cyan + accent orange)
+    const light1 = new THREE.PointLight(0x6bdbdb, 2, 40);
+    const light2 = new THREE.PointLight(0xdc5c3b, 1.5, 40);
+    scene.add(light1, light2);
+
+    // Particles (~300 floating)
+    const particleCount = 300;
+    const pGeometry = new THREE.BufferGeometry();
+    const pPositions = new Float32Array(particleCount * 3);
+
+    for (let i = 0; i < particleCount; i++) {
+        pPositions[i * 3]     = (Math.random() - 0.5) * 30;
+        pPositions[i * 3 + 1] = (Math.random() - 0.5) * 20;
+        pPositions[i * 3 + 2] = (Math.random() - 0.5) * 20;
+    }
+    pGeometry.setAttribute('position', new THREE.BufferAttribute(pPositions, 3));
+
+    const pMaterial = new THREE.PointsMaterial({
+        color: 0x6bdbdb,
+        size: 0.04,
+        transparent: true,
+        opacity: 0.5,
+        sizeAttenuation: true,
+    });
+    const particles = new THREE.Points(pGeometry, pMaterial);
+    scene.add(particles);
+
+    // Load font and create 3D extruded domain name
+    const fontLoader = new FontLoader();
+    let textMesh;
+
+    fontLoader.load('https://cdn.jsdelivr.net/npm/three@0.175.0/examples/fonts/helvetiker_bold.typeface.json', (font) => {
+        const textGeo = new TextGeometry(domainName, {
+            font: font,
+            size: 1.0,
+            depth: 0.4,
+            curveSegments: 6,
+            bevelEnabled: true,
+            bevelThickness: 0.03,
+            bevelSize: 0.02,
+            bevelSegments: 3,
+        });
+
+        textGeo.computeBoundingBox();
+        const center = new THREE.Vector3();
+        textGeo.boundingBox.getCenter(center);
+        textGeo.translate(-center.x, -center.y, -center.z);
+
+        // Metallic cyan material (charte Since & Co)
+        const material = new THREE.MeshStandardMaterial({
+            color: 0x6bdbdb,
+            metalness: 0.8,
+            roughness: 0.15,
+            emissive: 0x6bdbdb,
+            emissiveIntensity: 0.15,
+        });
+
+        textMesh = new THREE.Mesh(textGeo, material);
+        textMesh.position.y = -0.5;
+        scene.add(textMesh);
+    });
+
+    // Animation
+    const clock = new THREE.Clock();
+
+    function animate() {
+        requestAnimationFrame(animate);
+        const t = clock.getElapsedTime();
+
+        // Orbit lights
+        light1.position.set(Math.sin(t * 0.5) * 8, Math.cos(t * 0.3) * 4, Math.sin(t * 0.2) * 5);
+        light2.position.set(Math.cos(t * 0.3) * 7, Math.sin(t * 0.4) * 3, Math.cos(t * 0.6) * 4);
+
+        // Slow rotation + sine oscillation
+        if (textMesh) {
+            textMesh.rotation.y = Math.sin(t * 0.2) * 0.2;
+            textMesh.position.y = -0.5 + Math.sin(t * 0.4) * 0.15;
+        }
+
+        // Floating particles
+        const pos = pGeometry.attributes.position.array;
+        for (let i = 0; i < particleCount; i++) {
+            pos[i * 3 + 1] += Math.sin(t + i) * 0.001;
+        }
+        pGeometry.attributes.position.needsUpdate = true;
+        particles.rotation.y = t * 0.01;
+
+        renderer.render(scene, camera);
+    }
+    animate();
+
+    // Resize
+    window.addEventListener('resize', () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+    </script>
+</body>
+</html>

@@ -1,0 +1,85 @@
+# VirtualHost HTTPS — www → apex redirect + apex site
+# Deployed by debian13-server.sh — Do not edit manually
+
+# --- VHost 1: www → apex redirect ---
+<VirtualHost *:443>
+    ServerName www.__HOSTNAME_FQDN__
+
+    # SSL
+    SSLEngine On
+    SSLCertificateFile    /etc/letsencrypt/live/__HOSTNAME_FQDN__/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/__HOSTNAME_FQDN__/privkey.pem
+
+    # Anti-indexation
+    Header always set X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+
+    # 301 redirect www → apex
+    RewriteEngine On
+    RewriteRule ^(.*)$ https://__HOSTNAME_FQDN__$1 [R=301,L]
+
+    ErrorLog  /var/log/apache2/__HOSTNAME_FQDN__/error.log
+    CustomLog /var/log/apache2/__HOSTNAME_FQDN__/access.log combined
+</VirtualHost>
+
+# --- VHost 2: Apex ---
+<VirtualHost *:443>
+    ServerName __HOSTNAME_FQDN__
+    DocumentRoot /var/www/__HOSTNAME_FQDN__/www/public
+
+    # --- SSL Hardening ---
+    SSLEngine On
+    SSLCertificateFile    /etc/letsencrypt/live/__HOSTNAME_FQDN__/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/__HOSTNAME_FQDN__/privkey.pem
+    SSLProtocol           All -SSLv3 -TLSv1 -TLSv1.1
+    SSLCipherSuite        ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384
+    SSLHonorCipherOrder   Off
+    SSLSessionTickets     Off
+
+    # OCSP Stapling
+    SSLUseStapling        On
+    SSLStaplingResponderTimeout 5
+    SSLStaplingReturnResponderErrors Off
+
+    # --- Anti-bot headers ---
+    Header always set X-Robots-Tag "noindex, nofollow, noarchive, nosnippet"
+
+    # --- Block bad user-agents ---
+    RewriteEngine On
+    RewriteCond %{HTTP_USER_AGENT} (nikto|sqlmap|nmap|masscan|zgrab|census|shodan|curl/|wget/|python-requests|go-http|libwww|scanner|exploit|vulnerability|attack) [NC]
+    RewriteRule .* - [F,L]
+
+    # --- Directory options ---
+    <Directory /var/www/__HOSTNAME_FQDN__/www/public>
+        Options -Indexes +FollowSymLinks
+        AllowOverride All
+        Require all granted
+    </Directory>
+
+    # --- Aggressive cache: images, fonts, video, audio → 1 year immutable ---
+    <FilesMatch "\.(ico|jpg|jpeg|png|gif|webp|avif|svg|woff|woff2|ttf|eot|otf|mp4|webm|ogg|mp3|wav|flac)$">
+        Header set Cache-Control "public, max-age=31536000, immutable"
+    </FilesMatch>
+
+    # --- Cache CSS/JS → 1 month ---
+    <FilesMatch "\.(css|js)$">
+        Header set Cache-Control "public, max-age=2592000"
+    </FilesMatch>
+
+    # --- Compression ---
+    <IfModule mod_deflate.c>
+        AddOutputFilterByType DEFLATE text/html text/plain text/css
+        AddOutputFilterByType DEFLATE application/javascript application/json
+        AddOutputFilterByType DEFLATE image/svg+xml
+        AddOutputFilterByType DEFLATE application/font-woff application/font-woff2 font/woff2
+    </IfModule>
+
+    # --- ETag tuning ---
+    FileETag MTime Size
+
+    # --- Logs ---
+    ErrorLog  /var/log/apache2/__HOSTNAME_FQDN__/error.log
+    CustomLog /var/log/apache2/__HOSTNAME_FQDN__/access.log combined
+</VirtualHost>
+
+# OCSP Stapling cache (shared across VHosts)
+SSLStaplingCache shmcb:/var/run/ocsp(128000)

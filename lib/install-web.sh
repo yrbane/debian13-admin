@@ -46,15 +46,15 @@ EOF
   systemctl restart apache2
   log "Apache/PHP installés et durcis."
 
-  # ---------------------------------- Pages d'erreur personnalisées ---------------------
-  section "Pages d'erreur personnalisées"
+  # ---------------------------------- Pages d'erreur WebGL --------------------------------
+  section "Pages d'erreur WebGL"
 
-  mkdir -p ${ERROR_PAGES_DIR}
+  mkdir -p "${ERROR_PAGES_DIR}/css"
 
   # Fichier de configuration des IPs de confiance (pour debug)
-  cat >${ERROR_PAGES_DIR}/trusted-ips.php <<'TRUSTEDIPS'
+  cat >"${ERROR_PAGES_DIR}/trusted-ips.php" <<'TRUSTEDIPS'
 <?php
-// IPs de confiance - générées par install.sh
+// IPs de confiance - générées par debian13-server.sh
 // Ces IPs verront les informations de debug sur les pages d'erreur
 $TRUSTED_IPS = [
 __TRUSTED_IPS_ARRAY__
@@ -74,26 +74,47 @@ TRUSTEDIPS
     for ip in $TRUSTED_IPS; do
       TRUSTED_IPS_PHP+="    '${ip}',\n"
     done
-    sed -i "s|__TRUSTED_IPS_ARRAY__|${TRUSTED_IPS_PHP}|" ${ERROR_PAGES_DIR}/trusted-ips.php
+    sed -i "s|__TRUSTED_IPS_ARRAY__|${TRUSTED_IPS_PHP}|" "${ERROR_PAGES_DIR}/trusted-ips.php"
   else
-    sed -i "s|__TRUSTED_IPS_ARRAY__|    // Aucune IP configurée|" ${ERROR_PAGES_DIR}/trusted-ips.php
+    sed -i "s|__TRUSTED_IPS_ARRAY__|    // Aucune IP configurée|" "${ERROR_PAGES_DIR}/trusted-ips.php"
   fi
 
-  # Template principal des pages d'erreur (externalisé dans templates/error-page.php)
-  ERROR_PAGE_TEMPLATE="${SCRIPT_DIR}/templates/error-page.php"
-  [[ ! -f "$ERROR_PAGE_TEMPLATE" ]] && ERROR_PAGE_TEMPLATE="${SCRIPTS_DIR}/templates/error-page.php"
-  if [[ -f "$ERROR_PAGE_TEMPLATE" ]]; then
-    cp "$ERROR_PAGE_TEMPLATE" ${ERROR_PAGES_DIR}/error.php
+  # Déployer error-notify.php (notification email 5xx avec throttle)
+  ERROR_NOTIFY_TEMPLATE="${SCRIPT_DIR}/templates/error-notify.php"
+  [[ ! -f "$ERROR_NOTIFY_TEMPLATE" ]] && ERROR_NOTIFY_TEMPLATE="${SCRIPTS_DIR}/templates/error-notify.php"
+  if [[ -f "$ERROR_NOTIFY_TEMPLATE" ]]; then
+    cp "$ERROR_NOTIFY_TEMPLATE" "${ERROR_PAGES_DIR}/error-notify.php"
+    sed -i "s|__ADMIN_EMAIL__|${EMAIL_FOR_CERTBOT}|g" "${ERROR_PAGES_DIR}/error-notify.php"
+    sed -i "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "${ERROR_PAGES_DIR}/error-notify.php"
+    sed -i "s|__ERROR_THROTTLE_SECONDS__|${ERROR_THROTTLE_SECONDS}|g" "${ERROR_PAGES_DIR}/error-notify.php"
   else
-    warn "Template error-page.php non trouvé. Pages d'erreur non déployées."
+    warn "Template error-notify.php non trouvé."
+  fi
+
+  # Déployer error-page-webgl.php → error.php
+  ERROR_WEBGL_TEMPLATE="${SCRIPT_DIR}/templates/error-page-webgl.php"
+  [[ ! -f "$ERROR_WEBGL_TEMPLATE" ]] && ERROR_WEBGL_TEMPLATE="${SCRIPTS_DIR}/templates/error-page-webgl.php"
+  if [[ -f "$ERROR_WEBGL_TEMPLATE" ]]; then
+    cp "$ERROR_WEBGL_TEMPLATE" "${ERROR_PAGES_DIR}/error.php"
+  else
+    warn "Template error-page-webgl.php non trouvé. Pages d'erreur non déployées."
+  fi
+
+  # Déployer error-style.css
+  ERROR_CSS_TEMPLATE="${SCRIPT_DIR}/templates/error-style.css"
+  [[ ! -f "$ERROR_CSS_TEMPLATE" ]] && ERROR_CSS_TEMPLATE="${SCRIPTS_DIR}/templates/error-style.css"
+  if [[ -f "$ERROR_CSS_TEMPLATE" ]]; then
+    cp "$ERROR_CSS_TEMPLATE" "${ERROR_PAGES_DIR}/css/error.css"
+  else
+    warn "Template error-style.css non trouvé."
   fi
 
   # Configuration Apache pour les pages d'erreur
   cat >/etc/apache2/conf-available/custom-error-pages.conf <<'ERRORCONF'
-# Pages d'erreur personnalisées
-Alias /error-pages ${ERROR_PAGES_DIR}
+# Pages d'erreur WebGL — deployed by debian13-server.sh
+Alias /errorpages /var/www/errorpages
 
-<Directory ${ERROR_PAGES_DIR}>
+<Directory /var/www/errorpages>
     Options -Indexes
     AllowOverride None
     Require all granted
@@ -101,25 +122,61 @@ Alias /error-pages ${ERROR_PAGES_DIR}
     <FilesMatch "\.php$">
         SetHandler application/x-httpd-php
     </FilesMatch>
+
+    # CSP: allow Three.js CDN for WebGL error pages
+    Header always set Content-Security-Policy "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; style-src 'self' 'unsafe-inline'; font-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://cdn.jsdelivr.net; img-src 'self' data:;"
 </Directory>
 
-# Rediriger les erreurs vers notre page PHP
-ErrorDocument 400 /error-pages/error.php?code=400
-ErrorDocument 401 /error-pages/error.php?code=401
-ErrorDocument 403 /error-pages/error.php?code=403
-ErrorDocument 404 /error-pages/error.php?code=404
-ErrorDocument 500 /error-pages/error.php?code=500
-ErrorDocument 502 /error-pages/error.php?code=502
-ErrorDocument 503 /error-pages/error.php?code=503
+# Error documents — all codes 400-511
+ErrorDocument 400 /errorpages/error.php
+ErrorDocument 401 /errorpages/error.php
+ErrorDocument 402 /errorpages/error.php
+ErrorDocument 403 /errorpages/error.php
+ErrorDocument 404 /errorpages/error.php
+ErrorDocument 405 /errorpages/error.php
+ErrorDocument 406 /errorpages/error.php
+ErrorDocument 407 /errorpages/error.php
+ErrorDocument 408 /errorpages/error.php
+ErrorDocument 409 /errorpages/error.php
+ErrorDocument 410 /errorpages/error.php
+ErrorDocument 411 /errorpages/error.php
+ErrorDocument 412 /errorpages/error.php
+ErrorDocument 413 /errorpages/error.php
+ErrorDocument 414 /errorpages/error.php
+ErrorDocument 415 /errorpages/error.php
+ErrorDocument 416 /errorpages/error.php
+ErrorDocument 417 /errorpages/error.php
+ErrorDocument 421 /errorpages/error.php
+ErrorDocument 422 /errorpages/error.php
+ErrorDocument 423 /errorpages/error.php
+ErrorDocument 424 /errorpages/error.php
+ErrorDocument 425 /errorpages/error.php
+ErrorDocument 426 /errorpages/error.php
+ErrorDocument 428 /errorpages/error.php
+ErrorDocument 429 /errorpages/error.php
+ErrorDocument 431 /errorpages/error.php
+ErrorDocument 451 /errorpages/error.php
+ErrorDocument 500 /errorpages/error.php
+ErrorDocument 501 /errorpages/error.php
+ErrorDocument 502 /errorpages/error.php
+ErrorDocument 503 /errorpages/error.php
+ErrorDocument 504 /errorpages/error.php
+ErrorDocument 505 /errorpages/error.php
+ErrorDocument 506 /errorpages/error.php
+ErrorDocument 507 /errorpages/error.php
+ErrorDocument 508 /errorpages/error.php
+ErrorDocument 510 /errorpages/error.php
+ErrorDocument 511 /errorpages/error.php
 ERRORCONF
 
   a2enconf custom-error-pages
 
   # Permissions
   chown -R "${WEB_USER}:${WEB_USER}" "${ERROR_PAGES_DIR}"
-  chmod 644 ${ERROR_PAGES_DIR}/*.php
+  find "${ERROR_PAGES_DIR}" -type f -name "*.php" -exec chmod 644 {} +
+  find "${ERROR_PAGES_DIR}" -type f -name "*.css" -exec chmod 644 {} +
 
-  log "Pages d'erreur personnalisées installées dans ${ERROR_PAGES_DIR}/"
+  log "Pages d'erreur WebGL installées dans ${ERROR_PAGES_DIR}/"
 fi
 
 # ---------------------------------- 6) MariaDB ----------------------------------------
@@ -417,6 +474,117 @@ RENEWHOOK
   fi
 
   log "Certbot installé avec hook de renouvellement Apache."
+fi
+
+# ---------------------------------- 8b) VirtualHost + Parking ----------------------------
+if $INSTALL_APACHE_PHP; then
+  section "VirtualHost HTTPS + Page de parking"
+
+  # Structure des répertoires
+  mkdir -p "/var/www/${HOSTNAME_FQDN}/www/public/css"
+  mkdir -p "/var/log/apache2/${HOSTNAME_FQDN}"
+
+  # Déployer la page de parking (HTML + CSS)
+  PARKING_HTML_TEMPLATE="${SCRIPT_DIR}/templates/parking-page.html"
+  [[ ! -f "$PARKING_HTML_TEMPLATE" ]] && PARKING_HTML_TEMPLATE="${SCRIPTS_DIR}/templates/parking-page.html"
+  if [[ -f "$PARKING_HTML_TEMPLATE" ]]; then
+    cp "$PARKING_HTML_TEMPLATE" "/var/www/${HOSTNAME_FQDN}/www/public/index.html"
+    sed -i "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "/var/www/${HOSTNAME_FQDN}/www/public/index.html"
+  else
+    warn "Template parking-page.html non trouvé."
+  fi
+
+  PARKING_CSS_TEMPLATE="${SCRIPT_DIR}/templates/parking-style.css"
+  [[ ! -f "$PARKING_CSS_TEMPLATE" ]] && PARKING_CSS_TEMPLATE="${SCRIPTS_DIR}/templates/parking-style.css"
+  if [[ -f "$PARKING_CSS_TEMPLATE" ]]; then
+    cp "$PARKING_CSS_TEMPLATE" "/var/www/${HOSTNAME_FQDN}/www/public/css/style.css"
+  else
+    warn "Template parking-style.css non trouvé."
+  fi
+
+  # Générer robots.txt (Disallow all — parking page)
+  cat > "/var/www/${HOSTNAME_FQDN}/www/public/robots.txt" <<'ROBOTSTXT'
+User-agent: *
+Disallow: /
+ROBOTSTXT
+
+  # Permissions
+  chown -R "${WEB_USER}:${WEB_USER}" "/var/www/${HOSTNAME_FQDN}"
+
+  # Déployer les VHosts si le certificat SSL existe
+  CERT_DIR="/etc/letsencrypt/live/${HOSTNAME_FQDN}"
+  if [[ -f "${CERT_DIR}/fullchain.pem" && -f "${CERT_DIR}/privkey.pem" ]]; then
+    log "Certificat SSL détecté — déploiement des VirtualHosts..."
+
+    # Désactiver les sites par défaut
+    a2dissite 000-default.conf 2>/dev/null || true
+    a2dissite default-ssl.conf 2>/dev/null || true
+
+    # --- VHost HTTP → HTTPS redirect ---
+    VHOST_HTTP_TEMPLATE="${SCRIPT_DIR}/templates/vhost-http-redirect.conf.template"
+    [[ ! -f "$VHOST_HTTP_TEMPLATE" ]] && VHOST_HTTP_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-http-redirect.conf.template"
+    if [[ -f "$VHOST_HTTP_TEMPLATE" ]]; then
+      sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_HTTP_TEMPLATE" \
+        > "/etc/apache2/sites-available/000-${HOSTNAME_FQDN}-redirect.conf"
+      a2ensite "000-${HOSTNAME_FQDN}-redirect.conf"
+    fi
+
+    # --- VHost HTTPS apex + www redirect ---
+    VHOST_HTTPS_TEMPLATE="${SCRIPT_DIR}/templates/vhost-https.conf.template"
+    [[ ! -f "$VHOST_HTTPS_TEMPLATE" ]] && VHOST_HTTPS_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-https.conf.template"
+    if [[ -f "$VHOST_HTTPS_TEMPLATE" ]]; then
+      sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_HTTPS_TEMPLATE" \
+        > "/etc/apache2/sites-available/010-${HOSTNAME_FQDN}.conf"
+      a2ensite "010-${HOSTNAME_FQDN}.conf"
+    fi
+
+    # --- VHost wildcard (only if wildcard cert detected) ---
+    if openssl x509 -in "${CERT_DIR}/cert.pem" -noout -text 2>/dev/null | grep -q "\\*.${HOSTNAME_FQDN}"; then
+      VHOST_WILD_TEMPLATE="${SCRIPT_DIR}/templates/vhost-wildcard.conf.template"
+      [[ ! -f "$VHOST_WILD_TEMPLATE" ]] && VHOST_WILD_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-wildcard.conf.template"
+      if [[ -f "$VHOST_WILD_TEMPLATE" ]]; then
+        sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_WILD_TEMPLATE" \
+          > "/etc/apache2/sites-available/020-${HOSTNAME_FQDN}-wildcard.conf"
+        a2ensite "020-${HOSTNAME_FQDN}-wildcard.conf"
+        log "VHost wildcard *.${HOSTNAME_FQDN} activé."
+      fi
+    else
+      note "Certificat non-wildcard — VHost wildcard non déployé."
+      note "Pour activer : certbot certonly --dns-ovh -d ${HOSTNAME_FQDN} -d '*.${HOSTNAME_FQDN}'"
+    fi
+
+    # Vérifier la configuration Apache
+    if apache2ctl configtest 2>&1 | grep -q "Syntax OK"; then
+      systemctl reload apache2
+      log "VirtualHosts déployés et Apache rechargé."
+    else
+      warn "Erreur de syntaxe Apache — VHosts déployés mais non rechargés."
+      warn "Exécutez : apache2ctl configtest"
+    fi
+  else
+    warn "Certificat SSL non trouvé (${CERT_DIR})."
+    note "Les VirtualHosts seront activés après obtention du certificat :"
+    note "  certbot certonly --dns-ovh --dns-ovh-credentials ${OVH_DNS_CREDENTIALS} -d ${HOSTNAME_FQDN} -d '*.${HOSTNAME_FQDN}'"
+    note "  Puis relancez ce script pour déployer les VHosts."
+  fi
+
+  # Logrotate dédié par domaine
+  cat > "/etc/logrotate.d/apache-vhost-${HOSTNAME_FQDN}" <<LOGROTATE
+/var/log/apache2/${HOSTNAME_FQDN}/*.log {
+    daily
+    rotate 90
+    compress
+    delaycompress
+    missingok
+    notifempty
+    sharedscripts
+    postrotate
+        systemctl reload apache2 > /dev/null 2>&1 || true
+    endscript
+}
+LOGROTATE
+
+  log "Logrotate configuré pour /var/log/apache2/${HOSTNAME_FQDN}/"
 fi
 
 # ---------------------------------- 9) DNS auto-config (SPF/DKIM/DMARC) ----------------

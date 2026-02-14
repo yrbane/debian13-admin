@@ -195,6 +195,43 @@ ovh_setup_dmarc() {
   ovh_dns_refresh "$zone" || true
 }
 
+# ---- Fonctions reverse DNS (PTR) ----
+
+# Obtenir le reverse DNS actuel d'une IP
+# $1 = IP (IPv4 ou IPv6)
+# Retourne le reverse FQDN ou vide
+ovh_ip_reverse_get() {
+  local ip="$1"
+  # URL-encode IPv6 (remplacer : par %3A)
+  local ip_encoded="${ip//:/%3A}"
+  local result
+  result=$(ovh_api GET "/ip/${ip_encoded}/reverse") || return 1
+  # Retourne le premier reverse trouvé
+  echo "$result" | tr -d '[]"' | head -1
+}
+
+# Configurer le reverse DNS d'une IP
+# $1 = IP (IPv4 ou IPv6)
+# $2 = reverse FQDN (ex: srv.example.com)
+ovh_ip_reverse_set() {
+  local ip="$1" reverse_fqdn="$2"
+  # URL-encode IPv6 (remplacer : par %3A)
+  local ip_encoded="${ip//:/%3A}"
+
+  # Vérifier si un reverse existe déjà
+  local existing
+  existing=$(ovh_api GET "/ip/${ip_encoded}/reverse" 2>/dev/null) || true
+
+  # Si un reverse existe, le supprimer d'abord
+  if [[ -n "$existing" && "$existing" != "[]" ]]; then
+    ovh_api DELETE "/ip/${ip_encoded}/reverse/${ip_encoded}" 2>/dev/null || true
+  fi
+
+  # Créer le nouveau reverse
+  local body="{\"ipReverse\":\"${ip}\",\"reverse\":\"${reverse_fqdn}.\"}"
+  ovh_api POST "/ip/${ip_encoded}/reverse" "$body" || return 1
+}
+
 # Tester la délivrabilité email via Postfix
 # $1 = adresse destinataire, $2 = hostname
 ovh_test_mail() {

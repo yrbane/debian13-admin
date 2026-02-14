@@ -69,9 +69,11 @@ readonly RESOLVED_DROPIN_DIR="/etc/systemd/resolved.conf.d"
 readonly OVH_DNS_CREDENTIALS="/root/.ovh-dns.ini"
 readonly OVH_API_ENDPOINT="ovh-eu"
 readonly CERTBOT_DNS_PROPAGATION=60
-readonly ERROR_PAGES_DIR="/var/www/error-pages"
+readonly ERROR_PAGES_DIR="/var/www/errorpages"
 readonly SCRIPTS_DIR="/root/scripts"
 readonly WEB_USER="www-data"
+readonly ERROR_THROTTLE_SECONDS=300
+readonly THREE_JS_VERSION="r175"
 
 # Couleurs HTML (charte Since & Co)
 readonly HTML_COLOR_DARK="#142136"
