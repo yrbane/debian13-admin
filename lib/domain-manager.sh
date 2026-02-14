@@ -12,6 +12,7 @@
 : "${TEMPLATES_DIR:=${SCRIPT_DIR:-/root/scripts}/templates}"
 : "${LOG_DIR:=/var/log/apache2}"
 : "${DOMAINS_CONF_DIR:=${SCRIPTS_DIR:-/root/scripts}/domains.d}"
+: "${GIT_REPOS_DIR:=/var/git}"
 
 # ==============================================================================
 # Helpers internes (DRY)
@@ -798,5 +799,144 @@ dm_list_groups() {
       echo "$g"
       seen="${seen}|${g}|"
     fi
+  done < <(dm_list_domains)
+}
+
+# ==============================================================================
+# Reverse proxy
+# ==============================================================================
+
+# Déployer un VHost reverse proxy pour un domaine
+# $1 = domain, $2 = backend URL (ex: http://localhost:3000)
+dm_deploy_proxy() {
+  local domain="$1" backend="$2"
+  local conf="${APACHE_SITES_DIR}/015-${domain}-proxy.conf"
+
+  cat > "$conf" <<PROXY
+<VirtualHost *:443>
+    ServerName ${domain}
+    ServerAlias www.${domain}
+
+    ProxyPreserveHost On
+    ProxyPass / ${backend}/
+    ProxyPassReverse / ${backend}/
+
+    # WebSocket support
+    RewriteEngine On
+    RewriteCond %{HTTP:Upgrade} =websocket [NC]
+    RewriteRule /(.*) ws://${backend#http://}\$1 [P,L]
+
+    # Security headers
+    Header always set X-Frame-Options "SAMEORIGIN"
+    Header always set X-Content-Type-Options "nosniff"
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+
+    ErrorLog \${APACHE_LOG_DIR}/${domain}/error.log
+    CustomLog \${APACHE_LOG_DIR}/${domain}/access.log combined
+</VirtualHost>
+PROXY
+  log "Reverse proxy déployé : ${domain} → ${backend}"
+}
+
+# Supprimer le VHost reverse proxy
+# $1 = domain
+dm_remove_proxy() {
+  local domain="$1"
+  rm -f "${APACHE_SITES_DIR}/015-${domain}-proxy.conf"
+}
+
+# ==============================================================================
+# Git push-to-deploy
+# ==============================================================================
+
+# Configurer un dépôt git bare avec hook post-receive pour déploiement
+# $1 = domain
+dm_setup_git_deploy() {
+  local domain="$1"
+  local repo_dir="${GIT_REPOS_DIR}/${domain}.git"
+  local docroot="${WEB_ROOT}/${domain}/www/public"
+  local hook="${repo_dir}/hooks/post-receive"
+
+  mkdir -p "${repo_dir}"
+  git init --bare "$repo_dir" 2>/dev/null || true
+
+  mkdir -p "${repo_dir}/hooks"
+  cat > "$hook" <<HOOK
+#!/bin/bash
+GIT_WORK_TREE="${docroot}" git checkout -f
+echo "Deployed ${domain} to ${docroot}"
+HOOK
+  chmod +x "$hook"
+  log "Git deploy configuré : ${domain} → ${docroot}"
+}
+
+# Retourner l'URL du remote git pour un domaine
+# $1 = domain
+dm_get_git_remote() {
+  local domain="$1"
+  echo "ssh://root@${HOSTNAME_FQDN:-localhost}${GIT_REPOS_DIR}/${domain}.git"
+}
+
+# ==============================================================================
+# Per-domain database management
+# ==============================================================================
+
+# Créer une base de données et un utilisateur pour un domaine
+# $1 = domain
+dm_create_database() {
+  local domain="$1"
+  # Derive DB name from domain: dots → underscores
+  local db_name
+  db_name=$(echo "$domain" | tr '.' '_' | tr '-' '_')
+  local db_user="${db_name}"
+  local db_pass
+  db_pass=$(openssl rand -base64 18 2>/dev/null | tr -d '/+=' | head -c 16)
+  [[ -z "$db_pass" ]] && db_pass="pass$(date +%s)"
+
+  # Check if already configured
+  local existing
+  existing=$(dm_get_domain_config "$domain" "DB_NAME")
+  [[ -n "$existing" ]] && { log "DB: base déjà configurée pour ${domain}"; return 0; }
+
+  mysql -e "CREATE DATABASE IF NOT EXISTS \`${db_name}\`;" 2>/dev/null
+  mysql -e "CREATE USER IF NOT EXISTS '${db_user}'@'localhost' IDENTIFIED BY '${db_pass}';" 2>/dev/null
+  mysql -e "GRANT ALL PRIVILEGES ON \`${db_name}\`.* TO '${db_user}'@'localhost';" 2>/dev/null
+  mysql -e "FLUSH PRIVILEGES;" 2>/dev/null
+
+  dm_set_domain_config "$domain" "DB_NAME" "$db_name"
+  dm_set_domain_config "$domain" "DB_USER" "$db_user"
+  dm_set_domain_config "$domain" "DB_PASSWORD" "$db_pass"
+
+  log "DB: base ${db_name} créée pour ${domain} (user: ${db_user})"
+}
+
+# Supprimer la base de données et l'utilisateur d'un domaine
+# $1 = domain
+dm_drop_database() {
+  local domain="$1"
+  local db_name
+  db_name=$(dm_get_domain_config "$domain" "DB_NAME")
+  local db_user
+  db_user=$(dm_get_domain_config "$domain" "DB_USER")
+
+  [[ -z "$db_name" ]] && db_name=$(echo "$domain" | tr '.' '_' | tr '-' '_')
+  [[ -z "$db_user" ]] && db_user="$db_name"
+
+  mysql -e "DROP DATABASE IF EXISTS \`${db_name}\`;" 2>/dev/null
+  mysql -e "DROP USER IF EXISTS '${db_user}'@'localhost';" 2>/dev/null
+
+  log "DB: base ${db_name} supprimée pour ${domain}"
+}
+
+# Lister les domaines avec une base de données configurée
+dm_list_databases() {
+  local entry domain
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    domain="${entry%%:*}"
+    local db
+    db=$(dm_get_domain_config "$domain" "DB_NAME")
+    [[ -n "$db" ]] && echo "${domain}:${db}"
   done < <(dm_list_domains)
 }
