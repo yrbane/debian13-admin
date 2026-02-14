@@ -156,7 +156,7 @@ ovh_setup_dkim() {
 
   # Extraire la clé publique du fichier DKIM (format opendkim-genkey)
   local dkim_value
-  dkim_value=$(sed -n '/^[[:space:]]*"/s/^[[:space:]]*"//;s/"[[:space:]]*$//;s/"$//p' "$dkim_file" | tr -d '\n')
+  dkim_value=$(grep -oE '"[^"]*"' "$dkim_file" | tr -d '"' | tr -d '\n')
 
   if [[ -z "$dkim_value" ]]; then
     echo "DKIM : impossible d'extraire la clé de ${dkim_file}" >&2
