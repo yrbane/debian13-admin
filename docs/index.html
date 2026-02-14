@@ -717,7 +717,7 @@ document.querySelectorAll('.test-bar').forEach(el => barObs.observe(el));
     light2.position.set(-3, -2, 4);
     scene.add(light2);
 
-    // Debian spiral path
+    // Organic Debian spiral path — hand-drawn wobble
     function spiralPath() {
         const pts = [];
         const N = 500;
@@ -726,34 +726,74 @@ document.querySelectorAll('.test-bar').forEach(el => barObs.observe(el));
             const t = i / N;
             const a = t * maxA - Math.PI * 0.5;
             const r = 0.12 + t * 2.6;
+            // Organic wobble on path (hand-drawn feel)
+            const wr = Math.sin(t*37)*Math.cos(t*19)*t*0.09
+                     + Math.sin(t*71)*t*0.04;
+            const wz = Math.sin(t*29)*Math.cos(t*13)*0.07
+                     + Math.sin(t*53)*0.03;
             pts.push(new THREE.Vector3(
-                r * Math.cos(a),
-                r * Math.sin(a),
-                Math.sin(t * Math.PI * 1.5) * 0.35
+                (r + wr) * Math.cos(a),
+                (r + wr) * Math.sin(a),
+                Math.sin(t * Math.PI * 1.5) * 0.35 + wz
             ));
         }
         return new THREE.CatmullRomCurve3(pts);
     }
 
     const curve = spiralPath();
+    const tubSegs = 400, radSegs = 16;
 
-    // Main tube — Debian red
-    const tubeGeo = new THREE.TubeGeometry(curve, 400, 0.07, 12, false);
+    // Rough surface noise — 3 octaves
+    function surfaceNoise(t, j) {
+        return 1.0
+            + Math.sin(t*47+j*3.7)*Math.cos(t*23+j*5.1)*0.18
+            + Math.sin(t*97+j*7.3)*Math.cos(t*67+j*11.1)*0.09
+            + Math.sin(t*197+j*13.7)*0.05;
+    }
+
+    // Rough tube with taper — thick base, thin tip
+    function roughenTube(geo, baseRadius) {
+        const pos = geo.attributes.position;
+        const ringSize = radSegs + 1;
+        const rings = tubSegs + 1;
+        for (let i = 0; i < rings; i++) {
+            const t = i / tubSegs;
+            const taper = 1.0 - t * 0.72;
+            const center = curve.getPointAt(Math.min(t, 0.999));
+            for (let j = 0; j < ringSize; j++) {
+                const idx = i * ringSize + j;
+                const dx = pos.getX(idx) - center.x;
+                const dy = pos.getY(idx) - center.y;
+                const dz = pos.getZ(idx) - center.z;
+                const s = taper * surfaceNoise(t * 50, j);
+                pos.setX(idx, center.x + dx * s);
+                pos.setY(idx, center.y + dy * s);
+                pos.setZ(idx, center.z + dz * s);
+            }
+        }
+        pos.needsUpdate = true;
+        geo.computeVertexNormals();
+    }
+
+    // Main tube — Debian red, matte/organic
+    const tubeGeo = new THREE.TubeGeometry(curve, tubSegs, 0.11, radSegs, false);
+    roughenTube(tubeGeo, 0.11);
     const tubeMat = new THREE.MeshStandardMaterial({
         color: 0xA81D33,
         emissive: 0xdc5c3b,
-        emissiveIntensity: 0.35,
-        metalness: 0.4,
-        roughness: 0.3
+        emissiveIntensity: 0.3,
+        metalness: 0.08,
+        roughness: 0.75
     });
     const spiral = new THREE.Mesh(tubeGeo, tubeMat);
 
-    // Glow tube — soft bloom fake
-    const glowGeo = new THREE.TubeGeometry(curve, 400, 0.18, 8, false);
+    // Glow tube — soft bloom, follows taper
+    const glowGeo = new THREE.TubeGeometry(curve, tubSegs, 0.22, 8, false);
+    roughenTube(glowGeo, 0.22);
     const glowMat = new THREE.MeshBasicMaterial({
         color: 0xdc5c3b,
         transparent: true,
-        opacity: 0.07,
+        opacity: 0.06,
         side: THREE.DoubleSide
     });
     const glow = new THREE.Mesh(glowGeo, glowMat);
