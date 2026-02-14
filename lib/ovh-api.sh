@@ -6,7 +6,7 @@
 # Charger les credentials OVH depuis le fichier .ini
 _ovh_load_creds() {
   local creds="${OVH_DNS_CREDENTIALS:-/root/.ovh-dns.ini}"
-  [[ -f "$creds" ]] || { echo "ERROR: $creds not found" >&2; return 1; }
+  [[ -f "$creds" ]] || { err "OVH: ${creds} introuvable"; return 1; }
   _OVH_AK=$(grep 'application_key' "$creds" | cut -d'=' -f2 | tr -d ' ')
   _OVH_AS=$(grep 'application_secret' "$creds" | cut -d'=' -f2 | tr -d ' ')
   _OVH_CK=$(grep 'consumer_key' "$creds" | cut -d'=' -f2 | tr -d ' ')
@@ -47,7 +47,7 @@ ovh_api() {
 
   # Détecter les erreurs API OVH (réponse contient "class" et "message")
   if echo "$response" | grep -q '"class"'; then
-    echo "OVH_API_ERROR: $response" >&2
+    err "OVH API: $response"
     return 1
   fi
   echo "$response"
@@ -125,12 +125,12 @@ ovh_setup_spf() {
   local zone="$1" server_ip="$2"
   local spf_value="\"v=spf1 a mx ip4:${server_ip} include:mx.ovh.com ~all\""
   local existing_id
-  existing_id=$(ovh_dns_find "$zone" "" "TXT") || { echo "SPF : erreur API" >&2; return 1; }
+  existing_id=$(ovh_dns_find "$zone" "" "TXT") || { err "SPF : erreur API"; return 1; }
 
   # Vérifier si un SPF existe déjà parmi les TXT du apex
   if [[ -n "$existing_id" ]]; then
     local ids
-    ids=$(ovh_api GET "/domain/zone/${zone}/record?fieldType=TXT&subDomain=") || { echo "SPF : erreur API" >&2; return 1; }
+    ids=$(ovh_api GET "/domain/zone/${zone}/record?fieldType=TXT&subDomain=") || { err "SPF : erreur API"; return 1; }
     for rid in $(echo "$ids" | tr -d '[]' | tr ',' ' '); do
       local rec
       rec=$(ovh_dns_get "$zone" "$rid") || continue
@@ -159,12 +159,12 @@ ovh_setup_dkim() {
   dkim_value=$(grep -oE '"[^"]*"' "$dkim_file" | tr -d '"' | tr -d '\n')
 
   if [[ -z "$dkim_value" ]]; then
-    echo "DKIM : impossible d'extraire la clé de ${dkim_file}" >&2
+    err "DKIM : impossible d'extraire la clé de ${dkim_file}"
     return 1
   fi
 
   local existing_id
-  existing_id=$(ovh_dns_find "$zone" "$subdomain" "TXT") || { echo "DKIM : erreur API" >&2; return 1; }
+  existing_id=$(ovh_dns_find "$zone" "$subdomain" "TXT") || { err "DKIM : erreur API"; return 1; }
 
   if [[ -n "$existing_id" ]]; then
     log "DKIM : enregistrement existant (ID ${existing_id}), mise à jour..."
@@ -183,7 +183,7 @@ ovh_setup_dmarc() {
   local dmarc_value="\"v=DMARC1; p=quarantine; rua=mailto:${admin_email}; sp=quarantine; aspf=r;\""
 
   local existing_id
-  existing_id=$(ovh_dns_find "$zone" "_dmarc" "TXT") || { echo "DMARC : erreur API" >&2; return 1; }
+  existing_id=$(ovh_dns_find "$zone" "_dmarc" "TXT") || { err "DMARC : erreur API"; return 1; }
 
   if [[ -n "$existing_id" ]]; then
     log "DMARC : enregistrement existant (ID ${existing_id}), mise à jour..."

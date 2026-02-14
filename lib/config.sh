@@ -79,7 +79,7 @@ save_config() {
         echo "${var}=\"${val}\""
       fi
     done
-  } > "$CONFIG_FILE"
+  } > "$CONFIG_FILE" || { err "Impossible d'écrire ${CONFIG_FILE}"; return 1; }
   log "Configuration sauvegardée dans ${CONFIG_FILE}"
 }
 
