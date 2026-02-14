@@ -432,3 +432,34 @@ EOF
 
   log "Fail2ban: filtres et jails étendus déployés"
 }
+
+# ---------------------------------- Health endpoint -----------------------------------
+
+# Déployer un script /healthz pour un domaine
+# $1 = domain — crée un script CGI retournant du JSON
+deploy_healthz() {
+  local domain="$1"
+  local docroot="${WEB_ROOT}/${domain}/www/public"
+  mkdir -p "$docroot"
+
+  cat > "${docroot}/healthz" <<'HEALTHZ'
+#!/bin/bash
+echo "Content-Type: application/json"
+echo ""
+cat <<JSON
+{
+  "status": "ok",
+  "hostname": "$(hostname -f 2>/dev/null || echo unknown)",
+  "uptime": "$(uptime -p 2>/dev/null || echo unknown)",
+  "load": "$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)",
+  "disk_used": "$(df -h / 2>/dev/null | awk 'NR==2{print $5}')",
+  "disk_avail": "$(df -h / 2>/dev/null | awk 'NR==2{print $4}')",
+  "memory_used": "$(free -m 2>/dev/null | awk '/Mem:/{printf "%d/%dMB", $3, $2}')",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+}
+JSON
+HEALTHZ
+  chmod +x "${docroot}/healthz"
+
+  log "Healthz endpoint déployé pour ${domain}"
+}
