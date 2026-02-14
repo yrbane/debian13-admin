@@ -1,0 +1,10 @@
+# Fichiers generes contenant des donnees sensibles
+debian13-server.conf
+domains.conf
+domains.d/
+fleet.conf
+*.bak
+*.log
+
+# OVH credentials
+.ovh-dns.ini

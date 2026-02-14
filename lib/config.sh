@@ -214,7 +214,7 @@ show_config() {
   for entry in "${CONFIG_VARS[@]}"; do
     var="${entry%%|*}"; type="${entry##*|}"
     [[ "$type" == "bool" ]] || continue
-    if [[ "${!var}" == "true" ]]; then
+    if [[ "${!var:-}" == "true" ]]; then
       local name="${var#INSTALL_}"
       name="${name,,}"
       name="${name//_/-}"
