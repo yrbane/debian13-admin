@@ -107,6 +107,25 @@ teardown() { teardown_test_env; }
   [ "$status" -ne 0 ]
 }
 
+# --- sed metacharacter safety ---
+@test "render_template: domain with dots renders correctly" {
+  dm_render_template "parking-page.html" "my.example.com" "${TEST_DIR}/out.html"
+  grep -q "my.example.com" "${TEST_DIR}/out.html"
+  ! grep -q "__HOSTNAME_FQDN__" "${TEST_DIR}/out.html"
+}
+
+@test "render_template: domain with ampersand is escaped" {
+  dm_render_template "parking-page.html" "a&b.com" "${TEST_DIR}/out.html"
+  grep -q "a&b.com" "${TEST_DIR}/out.html"  # literal &
+  ! grep -q "__HOSTNAME_FQDN__" "${TEST_DIR}/out.html"
+}
+
+@test "render_template: domain with slash is escaped" {
+  dm_render_template "parking-page.html" "a/b.com" "${TEST_DIR}/out.html"
+  grep -q "a/b.com" "${TEST_DIR}/out.html"
+  ! grep -q "__HOSTNAME_FQDN__" "${TEST_DIR}/out.html"
+}
+
 # --- idempotency ---
 @test "deploy_parking: idempotent (second run does not fail)" {
   dm_deploy_parking "example.com"

@@ -26,7 +26,10 @@ dm_render_template() {
     warn "Template introuvable: ${template}"
     return 1
   fi
-  sed "s/__HOSTNAME_FQDN__/${domain}/g" "$template" > "$dest"
+  # Echapper les metacaracteres sed dans le domaine (& / \ .)
+  local safe_domain
+  safe_domain=$(printf '%s' "$domain" | sed 's/[&/\]/\\&/g')
+  sed "s/__HOSTNAME_FQDN__/${safe_domain}/g" "$template" > "$dest"
 }
 
 # Upsert un enregistrement DNS OVH (find → update ou create)
