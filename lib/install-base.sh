@@ -262,7 +262,10 @@ failregex = ^<HOST> -.*".*".*(nikto|sqlmap|nmap|masscan|zgrab|censys|shodan|nucl
           ^<HOST> -.*"-" "-"$
 ignoreregex = ^<HOST> -.*".*".*(Googlebot|bingbot|Baiduspider|YandexBot|DuckDuckBot|facebookexternalhit|Twitterbot|LinkedInBot|WhatsApp|Slackbot|TelegramBot).*$
 FILTEREOF
+  # Filtres étendus (POST flood, credential stuffing, ban progressif)
+  deploy_fail2ban_extended
+
   systemctl enable --now fail2ban
   fail2ban-client reload
-  log "Fail2ban actif (SSH + filtres Apache)."
+  log "Fail2ban actif (SSH + filtres Apache + protection étendue)."
 fi

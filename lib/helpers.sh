@@ -377,3 +377,58 @@ deploy_egress_rules() {
 
   log "UFW: filtrage egress activé (deny par défaut + whitelist)"
 }
+
+# ---------------------------------- Fail2ban extended --------------------------------
+
+# Déployer filtres et jails Fail2ban avancés
+# Utilise FAIL2BAN_FILTER_DIR et FAIL2BAN_JAIL_DIR (overridable pour les tests)
+deploy_fail2ban_extended() {
+  local filter_dir="${FAIL2BAN_FILTER_DIR:-/etc/fail2ban/filter.d}"
+  local jail_dir="${FAIL2BAN_JAIL_DIR:-/etc/fail2ban/jail.d}"
+  mkdir -p "$filter_dir" "$jail_dir"
+
+  # Filtre : flood POST (formulaires, API)
+  cat > "${filter_dir}/apache-post-flood.conf" <<'EOF'
+[Definition]
+failregex = ^<HOST> .* "POST .* HTTP/.*" [245]\d\d
+ignoreregex =
+EOF
+
+  # Filtre : credential stuffing (401/403 en rafale)
+  cat > "${filter_dir}/apache-auth-flood.conf" <<'EOF'
+[Definition]
+failregex = ^<HOST> .* "(?:GET|POST) .* HTTP/.*" (?:401|403)
+ignoreregex =
+EOF
+
+  # Jails étendus
+  cat > "${jail_dir}/custom-extended.conf" <<'EOF'
+[apache-post-flood]
+enabled = true
+port = http,https
+filter = apache-post-flood
+logpath = /var/log/apache2/*access.log
+maxretry = 30
+findtime = 60
+bantime = 600
+
+[apache-auth-flood]
+enabled = true
+port = http,https
+filter = apache-auth-flood
+logpath = /var/log/apache2/*access.log
+maxretry = 10
+findtime = 120
+bantime = 1800
+
+[recidive]
+enabled = true
+logpath = /var/log/fail2ban.log
+banaction = %(banaction_allports)s
+maxretry = 3
+findtime = 86400
+bantime = 604800
+EOF
+
+  log "Fail2ban: filtres et jails étendus déployés"
+}
