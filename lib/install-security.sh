@@ -243,7 +243,24 @@ MODSECCONF
   log "block_hack.sh déployé (blocage IPs suspectes toutes les heures)"
 fi
 
-# ---------------------------------- 14g) Secure /tmp ----------------------------------
+# ---------------------------------- 14g) AppArmor ------------------------------------
+if $INSTALL_APPARMOR; then
+  section "AppArmor"
+  apt_install apparmor apparmor-utils
+
+  systemctl enable --now apparmor || true
+
+  deploy_apparmor_profiles
+
+  # Reload profiles
+  if command -v apparmor_parser >/dev/null 2>&1; then
+    apparmor_parser -r /etc/apparmor.d/ 2>/dev/null || true
+  fi
+
+  log "AppArmor activé avec profils locaux pour Apache, MariaDB et Postfix"
+fi
+
+# ---------------------------------- 14h) Secure /tmp ----------------------------------
 if $SECURE_TMP; then
   section "Sécurisation /tmp (noexec, nosuid, nodev)"
 

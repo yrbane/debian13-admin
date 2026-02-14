@@ -1221,3 +1221,39 @@ verify_dns() {
 
   emit_section_close
 }
+
+# ---------------------------------- AppArmor ----------------------------------------
+verify_apparmor() {
+  emit_section "AppArmor"
+
+  local aa_out enforce_count complain_count
+  local aa_cmd="${AA_STATUS_CMD:-aa-status}"
+  if ! aa_out=$($aa_cmd 2>/dev/null); then
+    emit_check fail "AppArmor : impossible d'obtenir le statut (aa-status)"
+    emit_section_close
+    return
+  fi
+
+  if echo "$aa_out" | grep -q "apparmor module is loaded"; then
+    emit_check ok "AppArmor : module chargé"
+  else
+    emit_check fail "AppArmor : module non chargé"
+    emit_section_close
+    return
+  fi
+
+  enforce_count=$(echo "$aa_out" | grep "profiles are in enforce mode" | grep -oE '[0-9]+' | head -1)
+  complain_count=$(echo "$aa_out" | grep "profiles are in complain mode" | grep -oE '[0-9]+' | head -1)
+
+  if [[ "${enforce_count:-0}" -gt 0 ]]; then
+    emit_check ok "AppArmor : ${enforce_count} profil(s) en enforce"
+  else
+    emit_check warn "AppArmor : aucun profil en enforce"
+  fi
+
+  if [[ "${complain_count:-0}" -gt 0 ]]; then
+    emit_check warn "AppArmor : ${complain_count} profil(s) en complain (non bloquant)"
+  fi
+
+  emit_section_close
+}

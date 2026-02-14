@@ -896,6 +896,7 @@ verify_system
 verify_devtools
 verify_dkim
 verify_sysconfig
+verify_apparmor
 verify_users
 verify_files
 verify_database

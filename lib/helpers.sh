@@ -272,3 +272,44 @@ threshold_color() {
     echo "green"
   fi
 }
+
+# ---------------------------------- AppArmor profiles --------------------------------
+
+# Déployer les profils AppArmor locaux pour Apache, MariaDB et Postfix
+# Utilise APPARMOR_LOCAL (overridable pour les tests)
+deploy_apparmor_profiles() {
+  local local_dir="${APPARMOR_LOCAL:-/etc/apparmor.d/local}"
+  mkdir -p "$local_dir"
+
+  # Apache : autoriser /var/www, SSL, logs, modules
+  cat > "${local_dir}/usr.sbin.apache2" <<'EOF'
+# Local AppArmor overrides for Apache
+/var/www/** r,
+/var/log/apache2/** rw,
+/var/log/apache2/ rw,
+/etc/letsencrypt/** r,
+/run/apache2/** rw,
+/var/cache/modsecurity/** rw,
+EOF
+
+  # MariaDB : autoriser data, logs, tmp
+  cat > "${local_dir}/usr.sbin.mariadbd" <<'EOF'
+# Local AppArmor overrides for MariaDB
+/var/lib/mysql/** rwk,
+/var/lib/mysql/ r,
+/var/log/mysql/** rw,
+/tmp/** rw,
+/run/mysqld/** rw,
+EOF
+
+  # Postfix SMTP daemon
+  cat > "${local_dir}/usr.lib.postfix.smtpd" <<'EOF'
+# Local AppArmor overrides for Postfix smtpd
+/etc/postfix/** r,
+/var/spool/postfix/** rwk,
+/var/log/mail.* rw,
+/etc/opendkim/** r,
+EOF
+
+  log "AppArmor: profils locaux déployés (Apache, MariaDB, Postfix)"
+}
