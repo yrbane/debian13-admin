@@ -259,7 +259,7 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
   else
     sed -i 's/^SecRuleEngine .*/SecRuleEngine DetectionOnly/' ${MODSEC_CONFIG}
   fi
-  sed -i 's|SecAuditLog .*|SecAuditLog ${MODSEC_AUDIT_LOG}|' ${MODSEC_CONFIG}
+  sed -i "s|SecAuditLog .*|SecAuditLog ${MODSEC_AUDIT_LOG}|" ${MODSEC_CONFIG}
 
   if [[ -n "${TRUSTED_IPS:-}" ]]; then
     cat >/etc/modsecurity/whitelist-trusted-ips.conf <<'WHITELIST_HEADER'

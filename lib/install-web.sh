@@ -188,7 +188,6 @@ ErrorDocument 421 /errorpages/error.php
 ErrorDocument 422 /errorpages/error.php
 ErrorDocument 423 /errorpages/error.php
 ErrorDocument 424 /errorpages/error.php
-ErrorDocument 425 /errorpages/error.php
 ErrorDocument 426 /errorpages/error.php
 ErrorDocument 428 /errorpages/error.php
 ErrorDocument 429 /errorpages/error.php
