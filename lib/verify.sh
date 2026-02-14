@@ -1296,3 +1296,49 @@ verify_egress() {
 
   emit_section_close
 }
+
+# ---------------------------------- SUID binaries (Point 18) -------------------------
+verify_suid_binaries() {
+  emit_section "Binaires SUID/SGID"
+
+  local count
+  count=$(find / -perm /6000 -type f 2>/dev/null | wc -l)
+  count=$(sanitize_int "$count")
+
+  if [[ "$count" -le 20 ]]; then
+    emit_check ok "SUID/SGID : ${count} binaire(s) trouvé(s)"
+  elif [[ "$count" -le 40 ]]; then
+    emit_check warn "SUID/SGID : ${count} binaire(s) — vérifier la liste"
+  else
+    emit_check warn "SUID/SGID : ${count} binaire(s) — nombre élevé, audit recommandé"
+  fi
+
+  emit_section_close
+}
+
+# ---------------------------------- TLS version check (Point 18) ---------------------
+verify_tls_version() {
+  emit_section "Configuration TLS"
+
+  local conf_dir="${APACHE_CONF_DIR:-/etc/apache2}"
+  local ssl_conf="${conf_dir}/mods-enabled/ssl.conf"
+
+  if [[ ! -f "$ssl_conf" ]]; then
+    emit_check warn "TLS : fichier ssl.conf non trouvé"
+    emit_section_close
+    return
+  fi
+
+  local proto_line
+  proto_line=$(grep -i "SSLProtocol" "$ssl_conf" 2>/dev/null | head -1) || proto_line=""
+
+  if [[ -z "$proto_line" ]]; then
+    emit_check warn "TLS : directive SSLProtocol non trouvée"
+  elif echo "$proto_line" | grep -q "\-TLSv1.1\|\-TLSv1 "; then
+    emit_check ok "TLS : TLSv1.0/1.1 désactivés"
+  else
+    emit_check warn "TLS : TLSv1.0 ou TLSv1.1 potentiellement actifs"
+  fi
+
+  emit_section_close
+}

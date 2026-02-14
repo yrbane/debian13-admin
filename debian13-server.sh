@@ -88,6 +88,7 @@ show_help() {
   printf "  ${GREEN}--audit${RESET}                   Vérifications + rapport email, sans installation.\n"
   printf "  ${GREEN}--check-dns${RESET}               Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
   printf "  ${GREEN}--fix${RESET}                     Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
+  printf "  ${GREEN}--dry-run${RESET}                 Simule les actions sans modifier le système.\n"
   printf "  ${GREEN}--renew-ovh${RESET}               Regénérer les credentials API OVH (certificat wildcard).\n"
   printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}                Affiche cette aide.\n"
   printf "\n"
@@ -195,6 +196,7 @@ DOMAIN_EXPORT=""
 DOMAIN_IMPORT=""
 BACKUP_MODE=false
 BACKUP_LIST_MODE=false
+DRY_RUN=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -223,6 +225,7 @@ while [[ $# -gt 0 ]]; do
       shift; DOMAIN_IMPORT="${1:-}"
       [[ -z "$DOMAIN_IMPORT" ]] && die "--domain-import nécessite un chemin vers l'archive."
       ;;
+    --dry-run) DRY_RUN=true ;;
     --backup) BACKUP_MODE=true ;;
     --backup-list) BACKUP_LIST_MODE=true ;;
     --domain-check)
@@ -899,6 +902,8 @@ verify_sysconfig
 verify_apparmor
 verify_auditd
 verify_egress
+verify_suid_binaries
+verify_tls_version
 verify_users
 verify_files
 verify_database
@@ -1136,7 +1141,15 @@ echo ""
 
 print_dns_actions
 
+print_title "Notifications"
+print_note "Configurer les webhooks dans le fichier .conf :"
+print_note "  SLACK_WEBHOOK, TELEGRAM_BOT_TOKEN + TELEGRAM_CHAT_ID, DISCORD_WEBHOOK"
+echo ""
+
 printf "${CYAN}Fichier log :${RESET} %s\n\n" "${LOG_FILE}"
+
+# Notification de fin d'installation
+notify_all "Installation terminée sur ${HOSTNAME_FQDN} — ${CHECKS_OK} OK, ${CHECKS_WARN} avertissements, ${CHECKS_FAIL} erreurs"
 
 # ================================== MODE AUDIT : EMAIL ================================
 # shellcheck source=lib/audit-html.sh

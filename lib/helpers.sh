@@ -463,3 +463,52 @@ HEALTHZ
 
   log "Healthz endpoint déployé pour ${domain}"
 }
+
+# ---------------------------------- Dry-run mode (Point 23) ---------------------------
+
+# Wrapper : exécute la commande sauf si DRY_RUN=true
+dry_run_wrap() {
+  if [[ "${DRY_RUN:-false}" == "true" ]]; then
+    echo "[DRY-RUN] $*"
+    return 0
+  fi
+  "$@"
+}
+
+# ---------------------------------- Notifications multi-canal (Point 24) --------------
+
+# Envoyer une notification Slack
+notify_slack() {
+  local message="$1"
+  [[ -n "${SLACK_WEBHOOK:-}" ]] || return 0
+  curl -s -X POST -H 'Content-type: application/json' \
+    --data "{\"text\":\"${message}\"}" \
+    "$SLACK_WEBHOOK" >/dev/null 2>&1 || true
+}
+
+# Envoyer une notification Telegram
+notify_telegram() {
+  local message="$1"
+  [[ -n "${TELEGRAM_BOT_TOKEN:-}" && -n "${TELEGRAM_CHAT_ID:-}" ]] || return 0
+  curl -s -X POST \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    -d "chat_id=${TELEGRAM_CHAT_ID}" \
+    -d "text=${message}" >/dev/null 2>&1 || true
+}
+
+# Envoyer une notification Discord
+notify_discord() {
+  local message="$1"
+  [[ -n "${DISCORD_WEBHOOK:-}" ]] || return 0
+  curl -s -X POST -H 'Content-type: application/json' \
+    --data "{\"content\":\"${message}\"}" \
+    "$DISCORD_WEBHOOK" >/dev/null 2>&1 || true
+}
+
+# Envoyer sur tous les canaux configurés
+notify_all() {
+  local message="$1"
+  notify_slack "$message"
+  notify_telegram "$message"
+  notify_discord "$message"
+}

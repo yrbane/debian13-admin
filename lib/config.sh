@@ -43,6 +43,7 @@ CONFIG_VARS=(
   "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "INSTALL_APPARMOR|bool"  "INSTALL_AUDITD|bool"  "EGRESS_FILTER|bool"
   "SECURE_TMP|bool"  "INSTALL_BASHRC_GLOBAL|bool"
   "TRUSTED_IPS|str"
+  "SLACK_WEBHOOK|str"  "TELEGRAM_BOT_TOKEN|str"  "TELEGRAM_CHAT_ID|str"  "DISCORD_WEBHOOK|str"
 )
 
 # Valeurs par défaut pour les modules (source unique)
@@ -58,6 +59,7 @@ declare -A MODULE_DEFAULTS=(
   [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [INSTALL_APPARMOR]=true  [INSTALL_AUDITD]=true  [EGRESS_FILTER]=false
   [SECURE_TMP]=true  [INSTALL_BASHRC_GLOBAL]=true
   [TRUSTED_IPS]=""
+  [SLACK_WEBHOOK]=""  [TELEGRAM_BOT_TOKEN]=""  [TELEGRAM_CHAT_ID]=""  [DISCORD_WEBHOOK]=""
 )
 
 apply_config_defaults() {
