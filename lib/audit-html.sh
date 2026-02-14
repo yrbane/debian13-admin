@@ -231,6 +231,17 @@ PROGHTML
   # DNS
   add_html_section "DNS"
   [[ -n "${DNS_A:-}" ]] && add_html_check ok "A : ${HOSTNAME_FQDN} → ${DNS_A}" || add_html_check warn "A : non résolu"
+  if [[ -n "${DNS_AAAA:-}" ]]; then
+    if [[ -n "${SERVER_IP6:-}" && "${DNS_AAAA}" == "${SERVER_IP6}" ]]; then
+      add_html_check ok "AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA}"
+    else
+      add_html_check warn "AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA} (incohérent)"
+    fi
+  elif [[ -n "${SERVER_IP6:-}" ]]; then
+    add_html_check warn "AAAA : non configuré (IPv6 disponible)"
+  else
+    add_html_check info "AAAA : non configuré (pas d'IPv6)"
+  fi
   [[ -n "${DNS_MX:-}" ]] && add_html_check ok "MX : ${DNS_MX}" || add_html_check warn "MX : non configuré"
   [[ -n "${DNS_SPF:-}" ]] && add_html_check ok "SPF : configuré" || add_html_check fail "SPF : non configuré"
   [[ -n "${DNS_DKIM:-}" ]] && add_html_check ok "DKIM : configuré" || add_html_check warn "DKIM : non configuré"
@@ -239,7 +250,11 @@ PROGHTML
   else
     add_html_check warn "DMARC : non configuré"
   fi
-  [[ -n "${DNS_PTR:-}" ]] && add_html_check ok "PTR : ${DNS_PTR}" || add_html_check warn "PTR : non configuré"
+  [[ -n "${DNS_PTR:-}" ]] && add_html_check ok "PTR IPv4 : ${DNS_PTR}" || add_html_check warn "PTR IPv4 : non configuré"
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    [[ -n "${DNS_PTR6:-}" ]] && add_html_check ok "PTR IPv6 : ${DNS_PTR6}" || add_html_check warn "PTR IPv6 : non configuré"
+  fi
+  [[ -n "${DNS_CAA:-}" ]] && add_html_check ok "CAA : configuré" || add_html_check info "CAA : non configuré"
   close_section
 
   # Protection GeoIP & ModSecurity
@@ -465,6 +480,23 @@ PROGHTML
   if [[ -n "$LOG_SIZE_MB_HTML" ]]; then
     LOG_SIZE_HTML=$(du -sh /var/log 2>/dev/null | awk '{print $1}')
     [[ "$LOG_SIZE_MB_HTML" -lt "$LOG_SIZE_WARN_MB" ]] && add_html_check ok "Logs : ${LOG_SIZE_HTML}" || add_html_check warn "Logs : ${LOG_SIZE_HTML}"
+  fi
+
+  # Logrotate
+  if [[ -f /var/lib/logrotate/status ]]; then
+    LOGROTATE_DATE_HTML=$(stat -c %Y /var/lib/logrotate/status 2>/dev/null)
+    if [[ -n "$LOGROTATE_DATE_HTML" ]]; then
+      LOGROTATE_AGE_HTML=$(days_since "$LOGROTATE_DATE_HTML")
+      if [[ "$LOGROTATE_AGE_HTML" -le 1 ]]; then
+        add_html_check ok "Logrotate : exécuté dans les dernières 24h"
+      elif [[ "$LOGROTATE_AGE_HTML" -le 7 ]]; then
+        add_html_check warn "Logrotate : dernière exécution il y a ${LOGROTATE_AGE_HTML} jours"
+      else
+        add_html_check warn "Logrotate : pas exécuté depuis ${LOGROTATE_AGE_HTML} jours"
+      fi
+    fi
+  else
+    add_html_check warn "Logrotate : statut inconnu"
   fi
 
   # Zombies

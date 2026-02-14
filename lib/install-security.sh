@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/install-security.sh — ClamAV, rkhunter, Logwatch, SSH alerts, AIDE, ModSec, /tmp, sysctl, bashrc
+# lib/install-security.sh — ClamAV, rkhunter, Logwatch, SSH alerts, AIDE, ModSec, /tmp, sysctl, logrotate, bashrc
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
 
 # ---------------------------------- 14) ClamAV ----------------------------------------
@@ -364,6 +364,57 @@ deploy_script "${SCRIPTS_DIR}/check-updates.sh" \
 
 log "Script check-updates.sh créé : ${SCRIPTS_DIR}/check-updates.sh"
 log "Cron configuré : lundi à 7h00"
+
+# ---------------------------------- 15b) Logrotate -----------------------------------
+section "Rotation des logs (logrotate)"
+apt_install logrotate
+
+cat > /etc/logrotate.d/custom-bootstrap <<'EOF'
+/var/log/sudo.log {
+    weekly
+    rotate 12
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+}
+
+/var/log/bootstrap_ovh_debian13.log {
+    monthly
+    rotate 3
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+}
+EOF
+
+log "Logrotate : rotation configurée pour sudo.log et bootstrap"
+
+if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
+  cat > /etc/logrotate.d/modsecurity-audit <<'EOF'
+/var/log/apache2/modsec_audit.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 root adm
+    postrotate
+        systemctl reload apache2 > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+  log "Logrotate : rotation quotidienne configurée pour modsec_audit.log"
+fi
+
+if logrotate --debug /etc/logrotate.d/custom-bootstrap > /dev/null 2>&1; then
+  log "Logrotate : test de configuration OK"
+else
+  warn "Logrotate : erreur dans la configuration custom-bootstrap"
+fi
 
 # ---------------------------------- 16) .bashrc global -------------------------------
 if $INSTALL_BASHRC_GLOBAL; then

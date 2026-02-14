@@ -375,6 +375,12 @@ verify_system() {
     emit_check warn "Logrotate : non configuré"
   fi
 
+  # Configs logrotate custom
+  [[ -f /etc/logrotate.d/custom-bootstrap ]] && emit_check ok "Logrotate : config custom-bootstrap présente" || emit_check warn "Logrotate : config custom-bootstrap absente"
+  if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
+    [[ -f /etc/logrotate.d/modsecurity-audit ]] && emit_check ok "Logrotate : config modsecurity-audit présente" || emit_check warn "Logrotate : config modsecurity-audit absente"
+  fi
+
   # Taille des logs
   local log_size log_size_mb
   log_size=$(du -sh /var/log 2>/dev/null | awk '{print $1}')
@@ -987,9 +993,28 @@ verify_listening() {
 verify_dns() {
   emit_section "Vérification DNS"
 
-  # IP publique
-  SERVER_IP=$(curl -sfS --max-time "${CURL_TIMEOUT}" https://api.ipify.org 2>/dev/null || curl -sfS --max-time "${CURL_TIMEOUT}" https://ifconfig.me 2>/dev/null || echo "")
-  [[ -n "$SERVER_IP" ]] && emit_check info "IP publique : ${SERVER_IP}"
+  # IP publique IPv4
+  SERVER_IP=$(curl -4 -sfS --max-time "${CURL_TIMEOUT}" https://api.ipify.org 2>/dev/null || curl -4 -sfS --max-time "${CURL_TIMEOUT}" https://ifconfig.me 2>/dev/null || echo "")
+  [[ -n "$SERVER_IP" ]] && emit_check info "IP publique IPv4 : ${SERVER_IP}"
+
+  # IP publique IPv6
+  SERVER_IP6=$(curl -6 -sfS --max-time "${CURL_TIMEOUT}" https://api6.ipify.org 2>/dev/null || curl -6 -sfS --max-time "${CURL_TIMEOUT}" https://ifconfig.me 2>/dev/null || echo "")
+  if [[ -n "$SERVER_IP6" ]]; then
+    emit_check info "IP publique IPv6 : ${SERVER_IP6}"
+  else
+    emit_check info "IPv6 : non disponible sur ce serveur"
+  fi
+
+  # Cohérence hostname
+  local system_fqdn
+  system_fqdn=$(hostname -f 2>/dev/null || echo "")
+  if [[ -n "$system_fqdn" ]]; then
+    if [[ "$system_fqdn" == "$HOSTNAME_FQDN" ]]; then
+      emit_check ok "Hostname : ${system_fqdn} (cohérent avec la config)"
+    else
+      emit_check warn "Hostname : ${system_fqdn} (config = ${HOSTNAME_FQDN})"
+    fi
+  fi
 
   # Domaine de base
   local dot_count
@@ -1023,6 +1048,38 @@ verify_dns() {
       fi
     else
       emit_check warn "DNS A : www.${HOSTNAME_FQDN} non résolu"
+    fi
+
+    # AAAA record (IPv6)
+    DNS_AAAA=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "$HOSTNAME_FQDN" @8.8.8.8 2>/dev/null | head -1)
+    if [[ -n "$DNS_AAAA" ]]; then
+      if [[ -n "$SERVER_IP6" && "$DNS_AAAA" == "$SERVER_IP6" ]]; then
+        emit_check ok "DNS AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA} (correspond à ce serveur)"
+      elif [[ -n "$SERVER_IP6" ]]; then
+        emit_check warn "DNS AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA} (ce serveur = ${SERVER_IP6})"
+      else
+        emit_check warn "DNS AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA} (IPv6 non détecté sur ce serveur)"
+      fi
+    else
+      if [[ -n "$SERVER_IP6" ]]; then
+        emit_check warn "DNS AAAA : ${HOSTNAME_FQDN} non résolu (IPv6 disponible mais pas de record AAAA)"
+      else
+        emit_check info "DNS AAAA : ${HOSTNAME_FQDN} non configuré (pas d'IPv6)"
+      fi
+    fi
+
+    # AAAA www
+    DNS_WWW6=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "www.${HOSTNAME_FQDN}" @8.8.8.8 2>/dev/null | head -1)
+    if [[ -n "$DNS_WWW6" ]]; then
+      if [[ -n "$SERVER_IP6" && "$DNS_WWW6" == "$SERVER_IP6" ]]; then
+        emit_check ok "DNS AAAA : www.${HOSTNAME_FQDN} → ${DNS_WWW6}"
+      elif [[ -n "$SERVER_IP6" ]]; then
+        emit_check warn "DNS AAAA : www.${HOSTNAME_FQDN} → ${DNS_WWW6} (ce serveur = ${SERVER_IP6})"
+      else
+        emit_check warn "DNS AAAA : www.${HOSTNAME_FQDN} → ${DNS_WWW6} (IPv6 non détecté)"
+      fi
+    elif [[ -n "$SERVER_IP6" ]]; then
+      emit_check warn "DNS AAAA : www.${HOSTNAME_FQDN} non résolu"
     fi
 
     # MX
@@ -1076,18 +1133,54 @@ verify_dns() {
       emit_check warn "DNS DMARC : _dmarc.${BASE_DOMAIN} non configuré"
     fi
 
-    # PTR
+    # PTR IPv4
     if [[ -n "$SERVER_IP" ]]; then
       DNS_PTR=$(dig +short +timeout="${DNS_TIMEOUT}" -x "$SERVER_IP" 2>/dev/null | head -1 | sed 's/\.$//')
       if [[ -n "$DNS_PTR" ]]; then
-        if [[ "$DNS_PTR" == "$HOSTNAME_FQDN" || "$DNS_PTR" == *"$BASE_DOMAIN"* ]]; then
-          emit_check ok "DNS PTR : ${SERVER_IP} → ${DNS_PTR}"
+        if [[ "$DNS_PTR" == "$HOSTNAME_FQDN" ]]; then
+          emit_check ok "DNS PTR IPv4 : ${SERVER_IP} → ${DNS_PTR}"
+        elif [[ "$DNS_PTR" == *"$BASE_DOMAIN"* ]]; then
+          emit_check warn "DNS PTR IPv4 : ${SERVER_IP} → ${DNS_PTR} (attendu exactement: ${HOSTNAME_FQDN})"
         else
-          emit_check warn "DNS PTR : ${SERVER_IP} → ${DNS_PTR} (attendu: ${HOSTNAME_FQDN})"
+          emit_check warn "DNS PTR IPv4 : ${SERVER_IP} → ${DNS_PTR} (attendu: ${HOSTNAME_FQDN})"
         fi
       else
-        emit_check warn "DNS PTR : reverse DNS non configuré pour ${SERVER_IP}"
+        emit_check warn "DNS PTR IPv4 : reverse DNS non configuré pour ${SERVER_IP}"
       fi
+    fi
+
+    # PTR IPv6
+    if [[ -n "$SERVER_IP6" ]]; then
+      DNS_PTR6=$(dig +short +timeout="${DNS_TIMEOUT}" -x "$SERVER_IP6" 2>/dev/null | head -1 | sed 's/\.$//')
+      if [[ -n "$DNS_PTR6" ]]; then
+        if [[ "$DNS_PTR6" == "$HOSTNAME_FQDN" ]]; then
+          emit_check ok "DNS PTR IPv6 : ${SERVER_IP6} → ${DNS_PTR6}"
+        elif [[ "$DNS_PTR6" == *"$BASE_DOMAIN"* ]]; then
+          emit_check warn "DNS PTR IPv6 : ${SERVER_IP6} → ${DNS_PTR6} (attendu exactement: ${HOSTNAME_FQDN})"
+        else
+          emit_check warn "DNS PTR IPv6 : ${SERVER_IP6} → ${DNS_PTR6} (attendu: ${HOSTNAME_FQDN})"
+        fi
+      else
+        emit_check warn "DNS PTR IPv6 : reverse DNS non configuré pour ${SERVER_IP6}"
+      fi
+    fi
+
+    # CAA (Certificate Authority Authorization)
+    DNS_CAA=$(dig +short +timeout="${DNS_TIMEOUT}" CAA "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | head -3)
+    if [[ -n "$DNS_CAA" ]]; then
+      emit_check ok "DNS CAA : ${BASE_DOMAIN} → $(echo "$DNS_CAA" | head -1)"
+    else
+      emit_check info "DNS CAA : ${BASE_DOMAIN} non configuré (recommandé pour restreindre les CA autorisées)"
+    fi
+
+    # NS (nameservers)
+    DNS_NS=$(dig +short +timeout="${DNS_TIMEOUT}" NS "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | sort)
+    if [[ -n "$DNS_NS" ]]; then
+      local ns_count
+      ns_count=$(echo "$DNS_NS" | wc -l)
+      emit_check ok "DNS NS : ${BASE_DOMAIN} → ${ns_count} serveurs ($(echo "$DNS_NS" | head -1 | sed 's/\.$//')...)"
+    else
+      emit_check warn "DNS NS : ${BASE_DOMAIN} aucun nameserver trouvé"
     fi
   else
     emit_check warn "dig non disponible - installation de dnsutils requise pour les checks DNS"

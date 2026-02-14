@@ -239,7 +239,10 @@ source "${LIB_DIR}/verify.sh"
 print_dns_actions() {
   print_title "Actions DNS requises chez le registrar"
   if [[ -n "${SERVER_IP:-}" ]]; then
-    print_note "IP publique de ce serveur : ${SERVER_IP}"
+    print_note "IP publique IPv4 : ${SERVER_IP}"
+  fi
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    print_note "IP publique IPv6 : ${SERVER_IP6}"
   fi
   echo ""
 
@@ -251,12 +254,30 @@ print_dns_actions() {
     print_cmd "${HOSTNAME_FQDN}.   IN A   ${SERVER_IP}"
   fi
 
-  # www
+  # www A
   if [[ -n "${DNS_WWW:-}" ]] && [[ "${DNS_WWW:-}" == "${SERVER_IP:-}" || "${DNS_WWW:-}" == "${DNS_A:-}" ]]; then
     log "A www.${HOSTNAME_FQDN} → ${DNS_WWW}"
   else
-    warn "www : ajouter chez le registrar :"
+    warn "www A : ajouter chez le registrar :"
     print_cmd "www.${HOSTNAME_FQDN}.   IN A   ${SERVER_IP}"
+  fi
+
+  # AAAA record (IPv6)
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    if [[ -n "${DNS_AAAA:-}" && "${DNS_AAAA:-}" == "${SERVER_IP6}" ]]; then
+      log "AAAA ${HOSTNAME_FQDN} → ${DNS_AAAA}"
+    else
+      warn "AAAA : ajouter/corriger chez le registrar :"
+      print_cmd "${HOSTNAME_FQDN}.   IN AAAA   ${SERVER_IP6}"
+    fi
+
+    # www AAAA
+    if [[ -n "${DNS_WWW6:-}" && "${DNS_WWW6:-}" == "${SERVER_IP6}" ]]; then
+      log "AAAA www.${HOSTNAME_FQDN} → ${DNS_WWW6}"
+    else
+      warn "www AAAA : ajouter chez le registrar :"
+      print_cmd "www.${HOSTNAME_FQDN}.   IN AAAA   ${SERVER_IP6}"
+    fi
   fi
 
   # MX
@@ -301,11 +322,11 @@ print_dns_actions() {
     print_cmd "_dmarc.${BASE_DOMAIN}.   IN TXT   \"v=DMARC1; p=quarantine; rua=mailto:${EMAIL_FOR_CERTBOT}; fo=1\""
   fi
 
-  # PTR (reverse DNS)
-  if [[ -n "${DNS_PTR:-}" ]] && [[ "${DNS_PTR:-}" == "$HOSTNAME_FQDN" || "${DNS_PTR:-}" == *"${BASE_DOMAIN}"* ]]; then
-    log "PTR ${SERVER_IP} → ${DNS_PTR}"
+  # PTR IPv4 (reverse DNS)
+  if [[ -n "${DNS_PTR:-}" ]] && [[ "${DNS_PTR:-}" == "$HOSTNAME_FQDN" ]]; then
+    log "PTR IPv4 ${SERVER_IP} → ${DNS_PTR}"
   else
-    warn "PTR (reverse DNS) : non configuré ou incorrect pour ${SERVER_IP}"
+    warn "PTR IPv4 (reverse DNS) : non configuré ou incorrect pour ${SERVER_IP}"
     if [[ -n "${DNS_PTR:-}" ]]; then
       print_note "Actuel : ${DNS_PTR} (attendu : ${HOSTNAME_FQDN})"
     fi
@@ -313,16 +334,45 @@ print_dns_actions() {
     print_note "  Manager OVH → IP → Roue crantée → Modifier le reverse → ${HOSTNAME_FQDN}"
   fi
 
+  # PTR IPv6 (reverse DNS)
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    if [[ -n "${DNS_PTR6:-}" ]] && [[ "${DNS_PTR6:-}" == "$HOSTNAME_FQDN" ]]; then
+      log "PTR IPv6 ${SERVER_IP6} → ${DNS_PTR6}"
+    else
+      warn "PTR IPv6 (reverse DNS) : non configuré ou incorrect pour ${SERVER_IP6}"
+      if [[ -n "${DNS_PTR6:-}" ]]; then
+        print_note "Actuel : ${DNS_PTR6} (attendu : ${HOSTNAME_FQDN})"
+      fi
+      print_note "Configurer dans le panneau OVH :"
+      print_note "  Manager OVH → IP → Sélectionner l'IPv6 → Modifier le reverse → ${HOSTNAME_FQDN}"
+    fi
+  fi
+
+  # CAA
+  if [[ -n "${DNS_CAA:-}" ]]; then
+    log "CAA ${BASE_DOMAIN} → configuré"
+  else
+    warn "CAA : recommandé pour restreindre les autorités de certification :"
+    print_cmd "${BASE_DOMAIN}.   IN CAA 0 issue \"letsencrypt.org\""
+  fi
+
   echo ""
   print_note "Postfix : envoi local uniquement (loopback-only)"
   echo ""
   print_note "Vérification rapide (après propagation DNS) :"
   print_cmd "dig +short A ${HOSTNAME_FQDN} @8.8.8.8"
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    print_cmd "dig +short AAAA ${HOSTNAME_FQDN} @8.8.8.8"
+  fi
   print_cmd "dig +short MX ${BASE_DOMAIN} @8.8.8.8"
   print_cmd "dig +short TXT ${BASE_DOMAIN} @8.8.8.8"
   print_cmd "dig +short TXT ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} @8.8.8.8"
   print_cmd "dig +short TXT _dmarc.${BASE_DOMAIN} @8.8.8.8"
   print_cmd "dig +short -x ${SERVER_IP}"
+  if [[ -n "${SERVER_IP6:-}" ]]; then
+    print_cmd "dig +short -x ${SERVER_IP6}"
+  fi
+  print_cmd "dig +short CAA ${BASE_DOMAIN} @8.8.8.8"
   echo ""
 }
 
@@ -658,6 +708,14 @@ echo ""
 
 print_title "Sécurité noyau & journaux"
 print_note "sysctl durci ; journald en stockage persistant"
+echo ""
+
+print_title "Rotation des logs (logrotate)"
+print_note "Rotation configurée : sudo.log (hebdo), bootstrap (mensuel)"
+if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
+  print_note "Rotation configurée : modsec_audit.log (quotidien, 14j)"
+fi
+print_cmd "logrotate --debug /etc/logrotate.d/custom-bootstrap"
 echo ""
 
 print_dns_actions
