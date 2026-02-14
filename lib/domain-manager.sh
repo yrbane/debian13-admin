@@ -11,6 +11,7 @@
 : "${LOGROTATE_DIR:=/etc/logrotate.d}"
 : "${TEMPLATES_DIR:=${SCRIPT_DIR:-/root/scripts}/templates}"
 : "${LOG_DIR:=/var/log/apache2}"
+: "${DOMAINS_CONF_DIR:=${SCRIPTS_DIR:-/root/scripts}/domains.d}"
 
 # ==============================================================================
 # Helpers internes (DRY)
@@ -646,4 +647,127 @@ dm_import_domain() {
 
   rm -rf "$staging"
   log "Import: ${domain} restauré depuis ${archive}"
+}
+
+# ==============================================================================
+# Per-domain configuration
+# ==============================================================================
+
+# Set a config key for a domain
+# $1 = domain, $2 = key, $3 = value
+dm_set_domain_config() {
+  local domain="$1" key="$2" value="$3"
+  mkdir -p "$DOMAINS_CONF_DIR"
+  local conf="${DOMAINS_CONF_DIR}/${domain}.conf"
+  # Remove existing key if present, then append
+  if [[ -f "$conf" ]]; then
+    local tmp
+    tmp=$(grep -v "^${key}=" "$conf" 2>/dev/null || true)
+    printf '%s\n' "$tmp" > "$conf"
+  fi
+  echo "${key}=${value}" >> "$conf"
+  # Clean empty lines at top
+  sed -i '/^$/d' "$conf"
+}
+
+# Get a config key for a domain
+# $1 = domain, $2 = key, $3 = default (optional)
+dm_get_domain_config() {
+  local domain="$1" key="$2" default="${3:-}"
+  local conf="${DOMAINS_CONF_DIR}/${domain}.conf"
+  if [[ -f "$conf" ]]; then
+    local val
+    val=$(grep "^${key}=" "$conf" 2>/dev/null | tail -1 | cut -d= -f2-)
+    if [[ -n "$val" ]]; then
+      echo "$val"
+      return 0
+    fi
+  fi
+  [[ -n "$default" ]] && echo "$default"
+  return 0
+}
+
+# List all config keys for a domain
+# $1 = domain
+dm_list_domain_config() {
+  local domain="$1"
+  local conf="${DOMAINS_CONF_DIR}/${domain}.conf"
+  [[ -f "$conf" ]] && grep -v '^#' "$conf" | grep -v '^$' || true
+}
+
+# ==============================================================================
+# Staging mode
+# ==============================================================================
+
+# Deploy a domain in staging mode (no SSL via certbot, no DNS)
+# $1 = domain, $2 = selector (default: mail)
+dm_deploy_staging() {
+  local domain="$1" selector="${2:-mail}"
+  dm_register_domain "$domain" "$selector"
+  dm_set_domain_config "$domain" "STAGING" "true"
+  dm_deploy_parking "$domain"
+  dm_deploy_vhosts "$domain"
+  dm_deploy_logrotate "$domain"
+  log "Staging: ${domain} déployé en mode staging (pas de SSL/DNS)"
+}
+
+# Check if a domain is in staging mode
+# $1 = domain — returns 0 if staging, 1 otherwise
+dm_is_staging() {
+  local domain="$1"
+  local val
+  val=$(dm_get_domain_config "$domain" "STAGING")
+  [[ "$val" == "true" ]]
+}
+
+# Promote a staging domain to production (clear staging flag)
+# $1 = domain
+dm_promote_staging() {
+  local domain="$1"
+  dm_set_domain_config "$domain" "STAGING" "false"
+  log "Staging: ${domain} promu en production"
+}
+
+# ==============================================================================
+# Domain groups
+# ==============================================================================
+
+# Assign a domain to a group
+dm_set_group() {
+  local domain="$1" group="$2"
+  dm_set_domain_config "$domain" "GROUP" "$group"
+}
+
+# Get the group for a domain (empty if none)
+dm_get_group() {
+  local domain="$1"
+  dm_get_domain_config "$domain" "GROUP"
+}
+
+# List all domains in a given group
+dm_list_group() {
+  local group="$1"
+  local entry domain
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    domain="${entry%%:*}"
+    local g
+    g=$(dm_get_domain_config "$domain" "GROUP")
+    [[ "$g" == "$group" ]] && echo "$domain"
+  done < <(dm_list_domains)
+}
+
+# List all distinct group names
+dm_list_groups() {
+  local entry domain seen=""
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    domain="${entry%%:*}"
+    local g
+    g=$(dm_get_domain_config "$domain" "GROUP")
+    if [[ -n "$g" && "$seen" != *"|${g}|"* ]]; then
+      echo "$g"
+      seen="${seen}|${g}|"
+    fi
+  done < <(dm_list_domains)
 }

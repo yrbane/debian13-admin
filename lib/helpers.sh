@@ -512,3 +512,88 @@ notify_all() {
   notify_telegram "$message"
   notify_discord "$message"
 }
+
+# ---------------------------------- Structured logging ---------------------------------
+
+# slog level message [key=value ...]
+# Writes a JSON log line to $STRUCTURED_LOG
+slog() {
+  [[ -n "${STRUCTURED_LOG:-}" ]] || return 0
+  local level="$1" msg="$2"; shift 2
+  # Escape double quotes in message
+  msg="${msg//\\/\\\\}"
+  msg="${msg//\"/\\\"}"
+  local ts
+  ts="$(date -Iseconds)"
+  local extra=""
+  local kv k v
+  for kv in "$@"; do
+    k="${kv%%=*}"
+    v="${kv#*=}"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    extra="${extra},\"${k}\":\"${v}\""
+  done
+  printf '{"ts":"%s","level":"%s","msg":"%s"%s}\n' "$ts" "$level" "$msg" "$extra" >> "$STRUCTURED_LOG"
+}
+
+# ---------------------------------- HTML audit report ----------------------------------
+
+# Start HTML report
+# $1 = title
+html_report_start() {
+  [[ -n "${HTML_REPORT:-}" ]] || return 0
+  local title="$1"
+  cat > "$HTML_REPORT" <<EOF
+<!DOCTYPE html>
+<html lang="fr">
+<head><meta charset="utf-8"><title>${title}</title>
+<style>
+body{font-family:sans-serif;margin:2em;background:#f5f5f5}
+h1{color:#333}h2{color:#555;border-bottom:1px solid #ddd;padding-bottom:4px}
+.ok{color:#2d7d2d}.warn{color:#b8860b}.fail{color:#c0392b}
+table{border-collapse:collapse;width:100%;margin-bottom:1.5em}
+td,th{padding:6px 12px;text-align:left;border-bottom:1px solid #eee}
+tr:hover{background:#e9e9e9}
+.summary{font-size:1.2em;margin:1em 0;padding:1em;background:#fff;border-radius:8px}
+</style></head>
+<body><h1>${title}</h1>
+EOF
+}
+
+# Add a section heading
+# $1 = section name
+html_report_section() {
+  [[ -n "${HTML_REPORT:-}" ]] || return 0
+  echo "<h2>$1</h2><table>" >> "$HTML_REPORT"
+}
+
+# Add a check result row
+# $1 = status (ok|warn|fail), $2 = description
+html_report_check() {
+  [[ -n "${HTML_REPORT:-}" ]] || return 0
+  local status="$1" desc="$2"
+  local icon
+  case "$status" in
+    ok)   icon="&#10004;" ;;
+    warn) icon="&#9888;"  ;;
+    fail) icon="&#10008;" ;;
+    *)    icon="?"        ;;
+  esac
+  echo "<tr><td class=\"${status}\">${icon} ${status}</td><td>${desc}</td></tr>" >> "$HTML_REPORT"
+}
+
+# Close the report
+html_report_end() {
+  [[ -n "${HTML_REPORT:-}" ]] || return 0
+  cat >> "$HTML_REPORT" <<EOF
+</table>
+<div class="summary">
+Résumé : <span class="ok">${CHECKS_OK:-0} OK</span> |
+<span class="warn">${CHECKS_WARN:-0} avertissements</span> |
+<span class="fail">${CHECKS_FAIL:-0} erreurs</span>
+</div>
+<p><em>Généré le $(date '+%F %T')</em></p>
+</body></html>
+EOF
+}

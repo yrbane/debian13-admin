@@ -51,4 +51,6 @@ override_paths() {
   APACHE_SITES_DIR="$TEST_APACHE_DIR/sites-available"
   LOGROTATE_DIR="$TEST_LOGROTATE_DIR"
   LOG_DIR="$TEST_LOG_DIR"
+  DOMAINS_CONF_DIR="${TEST_DIR}/domains.d"
+  mkdir -p "$DOMAINS_CONF_DIR"
 }

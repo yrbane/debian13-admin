@@ -107,9 +107,14 @@ show_help() {
   printf "  ${GREEN}--domain-check [dom]${RESET}      Vérifier la configuration d'un domaine (DNS, DKIM,\n"
   printf "                            SPF, DMARC, SSL, VHost). Sans argument : vérifie\n"
   printf "                            tous les domaines enregistrés.\n"
+  printf "  ${GREEN}--domain-staging <dom>${RESET}  Déployer un domaine en mode staging (pas de SSL/DNS).\n"
+  printf "  ${GREEN}--domain-promote <dom>${RESET}  Promouvoir un domaine staging en production.\n"
+  printf "  ${GREEN}--domain-group <d> <g>${RESET}  Assigner un domaine à un groupe.\n"
+  printf "  ${GREEN}--group-list${RESET}              Lister les groupes de domaines.\n"
   printf "  ${GREEN}--domain-export <dom>${RESET}    Exporter un domaine vers une archive tar.gz.\n"
   printf "                            Contient : DKIM, VHosts, logrotate, fichiers web.\n"
   printf "  ${GREEN}--domain-import <arch>${RESET}   Importer un domaine depuis une archive tar.gz.\n"
+  printf "  ${GREEN}--audit-html <path>${RESET}      Générer un rapport d'audit en HTML.\n"
   printf "  ${GREEN}--backup${RESET}                  Sauvegarde complète (configs, DKIM, MariaDB, cron).\n"
   printf "  ${GREEN}--backup-list${RESET}             Lister les sauvegardes disponibles.\n"
   printf "\n"
@@ -197,6 +202,12 @@ DOMAIN_IMPORT=""
 BACKUP_MODE=false
 BACKUP_LIST_MODE=false
 DRY_RUN=false
+DOMAIN_STAGING=""
+DOMAIN_PROMOTE=""
+DOMAIN_SET_GROUP=""
+DOMAIN_SET_GROUP_NAME=""
+GROUP_LIST_MODE=false
+AUDIT_HTML=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -235,6 +246,25 @@ while [[ $# -gt 0 ]]; do
         DOMAIN_CHECK_ALL=true
       fi
       ;;
+    --domain-staging)
+      shift; DOMAIN_STAGING="${1:-}"
+      [[ -z "$DOMAIN_STAGING" ]] && die "--domain-staging nécessite un nom de domaine."
+      ;;
+    --domain-promote)
+      shift; DOMAIN_PROMOTE="${1:-}"
+      [[ -z "$DOMAIN_PROMOTE" ]] && die "--domain-promote nécessite un nom de domaine."
+      ;;
+    --domain-group)
+      shift; DOMAIN_SET_GROUP="${1:-}"
+      [[ -z "$DOMAIN_SET_GROUP" ]] && die "--domain-group nécessite un domaine."
+      shift; DOMAIN_SET_GROUP_NAME="${1:-}"
+      [[ -z "$DOMAIN_SET_GROUP_NAME" ]] && die "--domain-group nécessite un nom de groupe."
+      ;;
+    --group-list) GROUP_LIST_MODE=true ;;
+    --audit-html)
+      shift; AUDIT_HTML="${1:-}"
+      [[ -z "$AUDIT_HTML" ]] && die "--audit-html nécessite un chemin de sortie."
+      ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $1"; show_help; exit 1 ;;
   esac
@@ -248,7 +278,7 @@ fi
 
 # Détection mode domain-*
 DOMAIN_MODE=false
-if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" || -n "$DOMAIN_EXPORT" || -n "$DOMAIN_IMPORT" ]]; then
+if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" || -n "$DOMAIN_EXPORT" || -n "$DOMAIN_IMPORT" || -n "$DOMAIN_STAGING" || -n "$DOMAIN_PROMOTE" || -n "$DOMAIN_SET_GROUP" || "$GROUP_LIST_MODE" == "true" ]]; then
   DOMAIN_MODE=true
 fi
 
@@ -329,6 +359,8 @@ fi
 # Chemins/constantes dérivées (readonly après affectation)
 DKIM_KEYDIR="${DKIM_KEYDIR_BASE:-/etc/opendkim/keys}"
 readonly LOG_FILE="/var/log/bootstrap_ovh_debian13.log"
+STRUCTURED_LOG="/var/log/bootstrap_structured.jsonl"
+[[ -n "$AUDIT_HTML" ]] && HTML_REPORT="$AUDIT_HTML"
 USER_HOME="$(get_user_home)"
 DEBIAN_FRONTEND=noninteractive
 export DEBIAN_FRONTEND
@@ -850,6 +882,51 @@ if [[ -n "$DOMAIN_IMPORT" ]]; then
   exit 0
 fi
 
+# --- --domain-staging ---
+if [[ -n "$DOMAIN_STAGING" ]]; then
+  section "Déploiement staging : ${DOMAIN_STAGING}"
+  load_config
+  dm_deploy_staging "$DOMAIN_STAGING"
+  log "Domaine ${DOMAIN_STAGING} déployé en mode staging."
+  log "Promouvoir en production : sudo $0 --domain-promote ${DOMAIN_STAGING}"
+  exit 0
+fi
+
+# --- --domain-promote ---
+if [[ -n "$DOMAIN_PROMOTE" ]]; then
+  section "Promotion en production : ${DOMAIN_PROMOTE}"
+  load_config
+  if ! dm_is_staging "$DOMAIN_PROMOTE"; then
+    die "${DOMAIN_PROMOTE} n'est pas en mode staging."
+  fi
+  dm_promote_staging "$DOMAIN_PROMOTE"
+  log "Domaine ${DOMAIN_PROMOTE} promu en production."
+  log "Configurer SSL/DNS : sudo $0 --domain-check ${DOMAIN_PROMOTE}"
+  exit 0
+fi
+
+# --- --domain-group ---
+if [[ -n "$DOMAIN_SET_GROUP" ]]; then
+  load_config
+  dm_set_group "$DOMAIN_SET_GROUP" "$DOMAIN_SET_GROUP_NAME"
+  log "Domaine ${DOMAIN_SET_GROUP} assigné au groupe '${DOMAIN_SET_GROUP_NAME}'."
+  exit 0
+fi
+
+# --- --group-list ---
+if $GROUP_LIST_MODE; then
+  load_config
+  section "Groupes de domaines"
+  while IFS= read -r grp; do
+    [[ -z "$grp" ]] && continue
+    printf "${BOLD}%s${RESET}:\n" "$grp"
+    while IFS= read -r dom; do
+      printf "  - %s\n" "$dom"
+    done < <(dm_list_group "$grp")
+  done < <(dm_list_groups)
+  exit 0
+fi
+
 # --- --domain-check ---
 if [[ -n "$DOMAIN_CHECK" ]] || $DOMAIN_CHECK_ALL; then
   CHECK_MODE="cli"
@@ -892,6 +969,7 @@ fi
 
 # ================================== VÉRIFICATIONS (exécution CLI) =====================
 CHECK_MODE="cli"
+[[ -n "${HTML_REPORT:-}" ]] && html_report_start "Audit ${HOSTNAME_FQDN} — $(date '+%F %T')"
 verify_services
 verify_ssh
 verify_web
@@ -911,6 +989,8 @@ verify_resources
 verify_ports
 verify_listening
 verify_dns
+
+[[ -n "${HTML_REPORT:-}" ]] && html_report_end && log "Rapport HTML : ${HTML_REPORT}"
 
 # Résumé des vérifications
 echo ""
