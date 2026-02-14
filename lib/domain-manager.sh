@@ -294,6 +294,58 @@ dm_obtain_ssl() {
 }
 
 # ==============================================================================
+# DANE/TLSA — sécurisation TLS pour SMTP
+# ==============================================================================
+
+# Générer un enregistrement TLSA (3 1 1) depuis un certificat
+# $1 = chemin vers le fichier cert.pem
+# Stdout: "3 1 1 <sha256hex>"
+dm_generate_tlsa_record() {
+  local cert="$1"
+  [[ -f "$cert" ]] || { warn "TLSA: certificat introuvable: ${cert}"; return 1; }
+
+  local hash
+  hash=$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null \
+    | openssl pkey -pubin -outform DER 2>/dev/null \
+    | openssl dgst -sha256 -hex 2>/dev/null \
+    | awk '{print $NF}')
+
+  [[ -n "$hash" && "${#hash}" -eq 64 ]] || { warn "TLSA: impossible de calculer le hash"; return 1; }
+
+  echo "3 1 1 ${hash}"
+}
+
+# Publier un enregistrement TLSA pour SMTP (port 25) via OVH API
+# $1 = domain
+dm_setup_tlsa() {
+  local domain="$1"
+  local cert_path="${LETSENCRYPT_LIVE:-/etc/letsencrypt/live}/${domain}/cert.pem"
+
+  if [[ ! -f "$cert_path" ]]; then
+    log "TLSA: pas de certificat pour ${domain}, ignoré"
+    return 0
+  fi
+
+  local tlsa_record
+  tlsa_record=$(dm_generate_tlsa_record "$cert_path") || return 0
+
+  local base_domain
+  base_domain=$(dm_extract_base_domain "$domain")
+  local subdomain
+  subdomain=$(_dm_subdomain "$domain" "$base_domain")
+
+  local tlsa_sub="_25._tcp"
+  [[ -n "$subdomain" ]] && tlsa_sub="_25._tcp.${subdomain}"
+
+  dm_dns_upsert "$base_domain" "$tlsa_sub" "TLSA" "\"${tlsa_record}\"" || {
+    warn "TLSA: échec publication pour ${domain}"
+    return 1
+  }
+
+  log "TLSA: enregistrement publié pour ${domain} (_25._tcp)"
+}
+
+# ==============================================================================
 # DNS — configuration via API OVH
 # ==============================================================================
 
@@ -343,6 +395,9 @@ dm_setup_dns() {
   if [[ -z "$caa_rid" ]]; then
     ovh_dns_create "$base_domain" "" "CAA" "\"0 issue \\\"${CAA_ISSUER:-letsencrypt.org}\\\"\"" 2>/dev/null && ((++DM_DNS_OK)) || ((++DM_DNS_FAIL))
   fi
+
+  # --- TLSA (DANE pour SMTP) ---
+  dm_setup_tlsa "$domain" && ((++DM_DNS_OK)) || ((++DM_DNS_FAIL))
 
   # --- Refresh zone ---
   ovh_dns_refresh "$base_domain" 2>/dev/null || true
