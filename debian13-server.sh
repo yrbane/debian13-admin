@@ -72,6 +72,8 @@ source "${LIB_DIR}/domain-manager.sh"
 source "${LIB_DIR}/backup.sh"
 # shellcheck source=lib/hooks.sh
 source "${LIB_DIR}/hooks.sh"
+# shellcheck source=lib/clone.sh
+source "${LIB_DIR}/clone.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -115,6 +117,8 @@ show_help() {
   printf "                            Contient : DKIM, VHosts, logrotate, fichiers web.\n"
   printf "  ${GREEN}--domain-import <arch>${RESET}   Importer un domaine depuis une archive tar.gz.\n"
   printf "  ${GREEN}--audit-html <path>${RESET}      Générer un rapport d'audit en HTML.\n"
+  printf "  ${GREEN}--clone-keygen${RESET}            Générer une clé SSH pour le clonage serveur.\n"
+  printf "  ${GREEN}--clone <ip> [port]${RESET}      Cloner la configuration vers un serveur cible.\n"
   printf "  ${GREEN}--backup${RESET}                  Sauvegarde complète (configs, DKIM, MariaDB, cron).\n"
   printf "  ${GREEN}--backup-list${RESET}             Lister les sauvegardes disponibles.\n"
   printf "\n"
@@ -208,6 +212,9 @@ DOMAIN_SET_GROUP=""
 DOMAIN_SET_GROUP_NAME=""
 GROUP_LIST_MODE=false
 AUDIT_HTML=""
+CLONE_KEYGEN=false
+CLONE_TARGET=""
+CLONE_PORT="22"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -264,6 +271,14 @@ while [[ $# -gt 0 ]]; do
     --audit-html)
       shift; AUDIT_HTML="${1:-}"
       [[ -z "$AUDIT_HTML" ]] && die "--audit-html nécessite un chemin de sortie."
+      ;;
+    --clone-keygen) CLONE_KEYGEN=true ;;
+    --clone)
+      shift; CLONE_TARGET="${1:-}"
+      [[ -z "$CLONE_TARGET" ]] && die "--clone nécessite une adresse IP cible."
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        shift; CLONE_PORT="$1"
+      fi
       ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $1"; show_help; exit 1 ;;
@@ -882,6 +897,28 @@ if [[ -n "$DOMAIN_IMPORT" ]]; then
   exit 0
 fi
 
+# --- --clone-keygen ---
+if $CLONE_KEYGEN; then
+  section "Génération de clé SSH pour clonage"
+  clone_generate_key
+  echo ""
+  log "Copiez cette clé publique sur le serveur cible :"
+  log "  ssh-copy-id -i ${CLONE_SSH_KEY}.pub root@<IP_CIBLE>"
+  log "Puis lancez le clonage :"
+  log "  sudo $0 --clone <IP_CIBLE> [port]"
+  exit 0
+fi
+
+# --- --clone ---
+if [[ -n "$CLONE_TARGET" ]]; then
+  section "Clonage vers ${CLONE_TARGET}:${CLONE_PORT}"
+  load_config
+  clone_preflight "$CLONE_TARGET" || exit 1
+  clone_sync "$CLONE_TARGET" "$CLONE_PORT"
+  notify_all "Clonage terminé vers ${CLONE_TARGET}"
+  exit 0
+fi
+
 # --- --domain-staging ---
 if [[ -n "$DOMAIN_STAGING" ]]; then
   section "Déploiement staging : ${DOMAIN_STAGING}"
@@ -1220,6 +1257,15 @@ print_note "Nommer les scripts : <événement>-<description>.sh (chmod +x)"
 echo ""
 
 print_dns_actions
+
+print_title "Clonage serveur"
+print_note "Générer une clé SSH :"
+print_cmd "sudo ${0} --clone-keygen"
+print_note "Copier la clé sur le serveur cible :"
+print_cmd "ssh-copy-id -i /root/.ssh/clone_rsa.pub root@<IP_CIBLE>"
+print_note "Lancer le clonage :"
+print_cmd "sudo ${0} --clone <IP_CIBLE> [port]"
+echo ""
 
 print_title "Notifications"
 print_note "Configurer les webhooks dans le fichier .conf :"
