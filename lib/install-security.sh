@@ -189,7 +189,11 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
     cp ${MODSEC_CONFIG}-recommended ${MODSEC_CONFIG}
   fi
 
-  sed -i 's/^SecRuleEngine .*/SecRuleEngine DetectionOnly/' ${MODSEC_CONFIG}
+  if $MODSEC_ENFORCE; then
+    sed -i 's/^SecRuleEngine .*/SecRuleEngine On/' ${MODSEC_CONFIG}
+  else
+    sed -i 's/^SecRuleEngine .*/SecRuleEngine DetectionOnly/' ${MODSEC_CONFIG}
+  fi
   sed -i 's|SecAuditLog .*|SecAuditLog ${MODSEC_AUDIT_LOG}|' ${MODSEC_CONFIG}
 
   if [[ -n "${TRUSTED_IPS:-}" ]]; then
@@ -230,8 +234,12 @@ MODSECCONF
     "Bloquer tentatives de hack (toutes les heures)" \
     "__TRUSTED_IPS__" "${TRUSTED_IPS:-}"
 
-  log "ModSecurity OWASP CRS installé (mode DetectionOnly)"
-  log "Pour activer le blocage : sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' ${MODSEC_CONFIG} && systemctl restart apache2"
+  if $MODSEC_ENFORCE; then
+    log "ModSecurity OWASP CRS installé (mode blocage actif)"
+  else
+    log "ModSecurity OWASP CRS installé (mode DetectionOnly)"
+    log "Pour activer le blocage : sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' ${MODSEC_CONFIG} && systemctl restart apache2"
+  fi
   log "block_hack.sh déployé (blocage IPs suspectes toutes les heures)"
 fi
 
@@ -240,11 +248,21 @@ if $SECURE_TMP; then
   section "Sécurisation /tmp (noexec, nosuid, nodev)"
 
   if mount | grep -q "on /tmp type"; then
-    backup_file /etc/fstab
-    if ! grep -q "noexec" /etc/fstab | grep -q "/tmp"; then
-      sed -i '/[[:space:]]\/tmp[[:space:]]/ s/defaults/defaults,noexec,nosuid,nodev/' /etc/fstab
-      mount -o remount /tmp
-      log "/tmp remonté avec noexec,nosuid,nodev"
+    # Vérifier si /tmp est dans fstab et s'il a déjà noexec
+    if grep -q "[[:space:]]/tmp[[:space:]]" /etc/fstab; then
+      if ! grep "[[:space:]]/tmp[[:space:]]" /etc/fstab | grep -q "noexec"; then
+        backup_file /etc/fstab
+        sed -i '/[[:space:]]\/tmp[[:space:]]/ s/defaults/defaults,noexec,nosuid,nodev/' /etc/fstab
+        mount -o remount /tmp
+        log "/tmp remonté avec noexec,nosuid,nodev"
+      else
+        log "/tmp déjà configuré avec noexec dans fstab"
+      fi
+    else
+      backup_file /etc/fstab
+      echo "tmpfs /tmp tmpfs defaults,noexec,nosuid,nodev,size=1G 0 0" >> /etc/fstab
+      mount -o remount /tmp 2>/dev/null || mount /tmp
+      log "/tmp ajouté au fstab avec noexec,nosuid,nodev"
     fi
   else
     if ! grep -q "tmpfs.*/tmp" /etc/fstab; then
@@ -265,6 +283,24 @@ if $SECURE_TMP; then
   fi
 
   log "/tmp et /var/tmp sécurisés"
+fi
+
+# ---------------------------------- 14h) Durcissement sudo ----------------------------
+section "Durcissement sudo"
+cat > /etc/sudoers.d/99-hardening <<EOF
+# Timeout de session sudo (5 minutes)
+Defaults timestamp_timeout=5
+# Log des commandes sudo
+Defaults logfile=${SUDO_LOG}
+# PATH sécurisé
+Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+EOF
+chmod 440 /etc/sudoers.d/99-hardening
+if visudo -c -f /etc/sudoers.d/99-hardening >/dev/null 2>&1; then
+  log "Durcissement sudo : timeout 5min, log dans ${SUDO_LOG}, secure_path"
+else
+  err "Fichier sudoers invalide, suppression par sécurité"
+  rm -f /etc/sudoers.d/99-hardening
 fi
 
 # ---------------------------------- 15) Sysctl/journald/updates -----------------------
@@ -289,8 +325,30 @@ kernel.kptr_restrict=2
 kernel.dmesg_restrict=1
 fs.protected_hardlinks=1
 fs.protected_symlinks=1
+fs.suid_dumpable=0
 EOF
 sysctl --system | tee -a "$LOG_FILE"
+
+# Désactiver le module USB storage (serveur headless)
+cat > /etc/modprobe.d/disable-usb-storage.conf <<'EOF'
+install usb-storage /bin/true
+EOF
+modprobe -r usb-storage 2>/dev/null || true
+log "Module usb-storage désactivé"
+
+# Core dumps à 0
+add_line_if_missing '^\* .*hard .*core .*0$' '* hard core 0' /etc/security/limits.conf
+log "Core dumps désactivés dans limits.conf"
+
+# Umask 027
+if [[ -f /etc/login.defs ]]; then
+  if grep -q "^UMASK" /etc/login.defs; then
+    sed -i 's/^UMASK.*/UMASK\t\t027/' /etc/login.defs
+  else
+    echo -e "UMASK\t\t027" >> /etc/login.defs
+  fi
+  log "Umask durci à 027 dans /etc/login.defs"
+fi
 
 sed -ri 's|^#?Storage=.*|Storage=persistent|' /etc/systemd/journald.conf
 systemctl restart systemd-journald

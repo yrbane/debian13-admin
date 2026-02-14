@@ -23,6 +23,7 @@ if $INSTALL_APACHE_PHP; then
   Header always set Referrer-Policy "strict-origin-when-cross-origin"
   Header always set X-XSS-Protection "1; mode=block"
   Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
 </IfModule>
 EOF
   a2enconf security-headers
@@ -303,6 +304,34 @@ fi
 if $INSTALL_CERTBOT; then
   section "Certbot (Let's Encrypt)"
   apt_install certbot python3-certbot-apache
-  note "Demande manuelle du certificat quand DNS OK:"
-  note "  certbot --apache -d ${HOSTNAME_FQDN} -d www.${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+
+  # Détecter si Apache écoute sur le port 80 (nécessaire pour le plugin apache)
+  if ss -tlnp 2>/dev/null | grep -q ":80 "; then
+    note "Demande manuelle du certificat quand DNS OK:"
+    note "  certbot --apache -d ${HOSTNAME_FQDN} -d www.${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+  else
+    warn "Apache n'écoute pas sur le port 80 (probablement derrière un reverse proxy)."
+    note "Utilisez le mode standalone ou webroot pour obtenir le certificat :"
+    note "  certbot certonly --standalone -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+    note "  ou: certbot certonly --webroot -w /var/www/html -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+  fi
+
+  # Hook de renouvellement (rechargement Apache après renouvellement)
+  mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+  cat > /etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh <<'RENEWHOOK'
+#!/bin/bash
+# Recharger Apache après renouvellement de certificat Let's Encrypt
+if systemctl is-active --quiet apache2; then
+  systemctl reload apache2
+fi
+RENEWHOOK
+  chmod +x /etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh
+
+  # S'assurer que le timer certbot est activé
+  if systemctl list-unit-files certbot.timer >/dev/null 2>&1; then
+    systemctl enable --now certbot.timer 2>/dev/null || true
+    log "Timer certbot activé (renouvellement automatique)"
+  fi
+
+  log "Certbot installé avec hook de renouvellement Apache."
 fi

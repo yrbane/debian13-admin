@@ -40,7 +40,7 @@ CONFIG_VARS=(
   "INSTALL_COMPOSER|bool"  "INSTALL_SYMFONY|bool"  "INSTALL_SHELL_FUN|bool"
   "INSTALL_YTDL|bool"  "INSTALL_CLAMAV|bool"  "INSTALL_RKHUNTER|bool"
   "INSTALL_LOGWATCH|bool"  "INSTALL_SSH_ALERT|bool"  "INSTALL_AIDE|bool"
-  "INSTALL_MODSEC_CRS|bool"  "SECURE_TMP|bool"  "INSTALL_BASHRC_GLOBAL|bool"
+  "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "SECURE_TMP|bool"  "INSTALL_BASHRC_GLOBAL|bool"
   "TRUSTED_IPS|str"
 )
 
@@ -54,7 +54,7 @@ declare -A MODULE_DEFAULTS=(
   [INSTALL_COMPOSER]=true  [INSTALL_SYMFONY]=false  [INSTALL_SHELL_FUN]=true
   [INSTALL_YTDL]=false  [INSTALL_CLAMAV]=true  [INSTALL_RKHUNTER]=true
   [INSTALL_LOGWATCH]=true  [INSTALL_SSH_ALERT]=true  [INSTALL_AIDE]=true
-  [INSTALL_MODSEC_CRS]=true  [SECURE_TMP]=true  [INSTALL_BASHRC_GLOBAL]=true
+  [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [SECURE_TMP]=true  [INSTALL_BASHRC_GLOBAL]=true
   [TRUSTED_IPS]=""
 )
 
@@ -118,6 +118,7 @@ ask_missing_options() {
     "INSTALL_SSH_ALERT|Activer les alertes email à chaque connexion SSH ?|y"
     "INSTALL_AIDE|Installer AIDE (détection modifications fichiers) ?|y"
     "INSTALL_MODSEC_CRS|Installer les règles OWASP CRS pour ModSecurity ?|y"
+    "MODSEC_ENFORCE|Activer ModSecurity en mode blocage (On) au lieu de DetectionOnly ?|n"
     "SECURE_TMP|Sécuriser /tmp (noexec, nosuid, nodev) ?|y"
     "INSTALL_BASHRC_GLOBAL|Déployer le .bashrc commun pour tous les utilisateurs ?|y"
     "PHP_DISABLE_FUNCTIONS|Désactiver les fonctions PHP dangereuses (exec, system...) ?|y"
@@ -272,6 +273,10 @@ ask_all_questions() {
   prompt_yes_no "Installer AIDE (détection modifications fichiers) ?" "y" || INSTALL_AIDE=false
   INSTALL_MODSEC_CRS=true
   prompt_yes_no "Installer les règles OWASP CRS pour ModSecurity ?" "y" || INSTALL_MODSEC_CRS=false
+  MODSEC_ENFORCE=false
+  if $INSTALL_MODSEC_CRS; then
+    prompt_yes_no "Activer ModSecurity en mode blocage (On) au lieu de DetectionOnly ?" "n" && MODSEC_ENFORCE=true
+  fi
   SECURE_TMP=true
   prompt_yes_no "Sécuriser /tmp (noexec, nosuid, nodev) ?" "y" || SECURE_TMP=false
   INSTALL_BASHRC_GLOBAL=true

@@ -66,7 +66,25 @@ Subsystem sftp  /usr/lib/openssh/sftp-server
 EOF
   systemctl restart ssh || systemctl reload ssh
   warn "Garde une session SSH ouverte lors du changement de port ! Nouvelle connexion : ssh -p ${SSH_PORT} ${ADMIN_USER}@${HOSTNAME_FQDN}"
+
+  # Nettoyer /root/.ssh/authorized_keys (PermitRootLogin=no rend ces clés inutiles)
+  if [[ -f /root/.ssh/authorized_keys ]] && [[ -s /root/.ssh/authorized_keys ]]; then
+    backup_file /root/.ssh/authorized_keys
+    > /root/.ssh/authorized_keys
+    log "Clés SSH de root nettoyées (PermitRootLogin=no, clés inutiles)"
+  fi
 fi
+
+# ---------------------------------- 2b) Désactiver LLMNR/mDNS -------------------------
+section "Désactivation LLMNR/mDNS"
+mkdir -p "${RESOLVED_DROPIN_DIR}"
+cat > "${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf" <<'EOF'
+[Resolve]
+LLMNR=no
+MulticastDNS=no
+EOF
+systemctl restart systemd-resolved 2>/dev/null || true
+log "LLMNR et mDNS désactivés (port 5355 fermé)"
 
 # ---------------------------------- 3) UFW --------------------------------------------
 if $INSTALL_UFW; then

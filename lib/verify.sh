@@ -150,6 +150,19 @@ verify_ssh() {
     check_config_grep "$SSHD_CONFIG" "^PasswordAuthentication\s+no" "SSH : auth par mot de passe désactivée" "SSH : auth par mot de passe NON désactivée"
     check_config_grep "$SSHD_CONFIG" "^Port\s+${SSH_PORT}" "SSH : port ${SSH_PORT} configuré" "SSH : port ${SSH_PORT} non trouvé"
     check_config_grep "$SSHD_CONFIG" "^AllowUsers\s+.*${ADMIN_USER}" "SSH : AllowUsers contient ${ADMIN_USER}" "SSH : AllowUsers sans ${ADMIN_USER}"
+
+    # Root authorized_keys (doit être vide si PermitRootLogin=no)
+    if [[ -f /root/.ssh/authorized_keys ]]; then
+      if [[ -s /root/.ssh/authorized_keys ]]; then
+        local root_keys
+        root_keys=$(grep -c "^ssh-" /root/.ssh/authorized_keys 2>/dev/null || echo "0")
+        emit_check warn "SSH : /root/.ssh/authorized_keys contient ${root_keys} clé(s) (inutile avec PermitRootLogin=no)"
+      else
+        emit_check ok "SSH : /root/.ssh/authorized_keys vide"
+      fi
+    else
+      emit_check ok "SSH : pas de /root/.ssh/authorized_keys"
+    fi
   fi
   emit_section_close
 }
@@ -202,6 +215,13 @@ verify_web() {
       emit_check info "PHP : fonctions exec/shell autorisées (choix utilisateur)"
     fi
 
+    # HSTS
+    if grep -q "Strict-Transport-Security" /etc/apache2/conf-available/security-headers.conf 2>/dev/null; then
+      emit_check ok "Apache : header HSTS configuré"
+    else
+      emit_check warn "Apache : header HSTS absent (Strict-Transport-Security)"
+    fi
+
     # mod_security
     if a2query -m security2 >/dev/null 2>&1; then
       emit_check ok "Apache : mod_security activé"
@@ -242,6 +262,13 @@ verify_web() {
         emit_check ok "SSL : renouvellement automatique activé"
       else
         emit_check warn "SSL : timer certbot non actif"
+      fi
+
+      # Hook de renouvellement
+      if [[ -x /etc/letsencrypt/renewal-hooks/deploy/reload-apache.sh ]]; then
+        emit_check ok "SSL : hook de renouvellement Apache présent"
+      else
+        emit_check warn "SSL : hook de renouvellement Apache absent"
       fi
     fi
   fi
@@ -394,6 +421,56 @@ verify_system() {
     else
       emit_check warn "/tmp : pas sécurisé (noexec non actif)"
     fi
+  fi
+
+  # LLMNR/mDNS
+  if [[ -f "${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf" ]]; then
+    emit_check ok "LLMNR/mDNS : désactivé (drop-in présent)"
+  else
+    if ss -tlnp 2>/dev/null | grep -q ":5355 "; then
+      emit_check fail "LLMNR : port 5355 ouvert (créer ${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf)"
+    else
+      emit_check ok "LLMNR : port 5355 fermé"
+    fi
+  fi
+
+  # USB storage
+  if [[ -f /etc/modprobe.d/disable-usb-storage.conf ]]; then
+    emit_check ok "USB storage : module désactivé"
+  else
+    emit_check warn "USB storage : module non désactivé"
+  fi
+
+  # Core dumps
+  if grep -qE '^\* .*hard .*core .*0$' /etc/security/limits.conf 2>/dev/null; then
+    emit_check ok "Core dumps : désactivés (limits.conf)"
+  else
+    emit_check warn "Core dumps : non restreints dans limits.conf"
+  fi
+  local suid_dump
+  suid_dump=$(sysctl -n fs.suid_dumpable 2>/dev/null || echo "?")
+  if [[ "$suid_dump" == "0" ]]; then
+    emit_check ok "Sysctl : fs.suid_dumpable = 0"
+  else
+    emit_check warn "Sysctl : fs.suid_dumpable = ${suid_dump} (attendu: 0)"
+  fi
+
+  # Umask
+  if grep -qP '^UMASK\s+027' /etc/login.defs 2>/dev/null; then
+    emit_check ok "Umask : 027 dans login.defs"
+  else
+    emit_check warn "Umask : non durci dans login.defs (attendu: 027)"
+  fi
+
+  # Sudo hardening
+  if [[ -f /etc/sudoers.d/99-hardening ]]; then
+    if visudo -c -f /etc/sudoers.d/99-hardening >/dev/null 2>&1; then
+      emit_check ok "Sudo : durcissement actif (timeout, log, secure_path)"
+    else
+      emit_check fail "Sudo : fichier 99-hardening invalide"
+    fi
+  else
+    emit_check warn "Sudo : pas de durcissement (99-hardening absent)"
   fi
 
   emit_section_close
