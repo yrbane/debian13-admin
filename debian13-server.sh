@@ -76,6 +76,8 @@ source "${LIB_DIR}/hooks.sh"
 source "${LIB_DIR}/clone.sh"
 # shellcheck source=lib/tui.sh
 source "${LIB_DIR}/tui.sh"
+# shellcheck source=lib/fleet.sh
+source "${LIB_DIR}/fleet.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -221,6 +223,14 @@ DASHBOARD_DOMAIN=""
 ROLLBACK_ID=""
 SNAPSHOT_LIST_MODE=false
 DKIM_ROTATE_DOMAIN=""
+FLEET_ADD_NAME=""
+FLEET_ADD_IP=""
+FLEET_ADD_PORT="22"
+FLEET_REMOVE_NAME=""
+FLEET_LIST_MODE=false
+FLEET_STATUS_MODE=false
+FLEET_EXEC_CMD=""
+FLEET_SYNC_MODE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -291,6 +301,26 @@ while [[ $# -gt 0 ]]; do
       shift; DKIM_ROTATE_DOMAIN="${1:-}"
       [[ -z "$DKIM_ROTATE_DOMAIN" ]] && die "--dkim-rotate nécessite un nom de domaine."
       ;;
+    --fleet-add)
+      shift; FLEET_ADD_NAME="${1:-}"
+      [[ -z "$FLEET_ADD_NAME" ]] && die "--fleet-add nécessite un nom."
+      shift; FLEET_ADD_IP="${1:-}"
+      [[ -z "$FLEET_ADD_IP" ]] && die "--fleet-add nécessite une IP."
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        shift; FLEET_ADD_PORT="$1"
+      fi
+      ;;
+    --fleet-remove)
+      shift; FLEET_REMOVE_NAME="${1:-}"
+      [[ -z "$FLEET_REMOVE_NAME" ]] && die "--fleet-remove nécessite un nom."
+      ;;
+    --fleet-list) FLEET_LIST_MODE=true ;;
+    --fleet-status) FLEET_STATUS_MODE=true ;;
+    --fleet-exec)
+      shift; FLEET_EXEC_CMD="${1:-}"
+      [[ -z "$FLEET_EXEC_CMD" ]] && die "--fleet-exec nécessite une commande."
+      ;;
+    --fleet-sync) FLEET_SYNC_MODE=true ;;
     --clone-keygen) CLONE_KEYGEN=true ;;
     --clone)
       shift; CLONE_TARGET="${1:-}"
@@ -959,6 +989,45 @@ if [[ -n "$DASHBOARD_DOMAIN" ]]; then
   echo ""
   log "Dashboard accessible : https://${DASHBOARD_DOMAIN}/dashboard-${DASHBOARD_SECRET}/"
   log "Restreint aux IPs : ${TRUSTED_IPS:-127.0.0.1}"
+  exit 0
+fi
+
+# --- Fleet management ---
+if [[ -n "$FLEET_ADD_NAME" ]]; then
+  fleet_add "$FLEET_ADD_NAME" "$FLEET_ADD_IP" "$FLEET_ADD_PORT"
+  exit 0
+fi
+if [[ -n "$FLEET_REMOVE_NAME" ]]; then
+  fleet_remove "$FLEET_REMOVE_NAME"
+  exit 0
+fi
+if $FLEET_LIST_MODE; then
+  section "Flotte de serveurs"
+  fleet_list
+  exit 0
+fi
+if $FLEET_STATUS_MODE; then
+  section "Statut de la flotte"
+  printf "%-15s %-20s %-6s %s\n" "NOM" "IP" "PORT" "UPTIME"
+  fleet_status
+  exit 0
+fi
+if [[ -n "$FLEET_EXEC_CMD" ]]; then
+  section "Exécution sur la flotte : ${FLEET_EXEC_CMD}"
+  fleet_exec "$FLEET_EXEC_CMD"
+  exit 0
+fi
+if $FLEET_SYNC_MODE; then
+  section "Synchronisation de la flotte"
+  while IFS= read -r entry; do
+    [[ -z "$entry" ]] && continue
+    local_name="${entry%%:*}"
+    local_rest="${entry#*:}"
+    local_ip="${local_rest%%:*}"
+    local_port="${local_rest#*:}"
+    log "Sync vers ${local_name} (${local_ip}:${local_port})..."
+    clone_sync "$local_ip" "$local_port"
+  done < <(fleet_list)
   exit 0
 fi
 
