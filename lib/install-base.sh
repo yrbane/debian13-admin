@@ -141,7 +141,7 @@ if $INSTALL_UFW; then
   log "UFW activé. Ports ouverts: ${SSH_PORT}/80/443."
 
   # Filtrage egress (optionnel)
-  if $EGRESS_FILTER; then
+  if ${EGRESS_FILTER:-false}; then
     deploy_egress_rules
   fi
 fi
