@@ -305,15 +305,97 @@ if $INSTALL_CERTBOT; then
   section "Certbot (Let's Encrypt)"
   apt_install certbot python3-certbot-apache
 
-  # Détecter si Apache écoute sur le port 80 (nécessaire pour le plugin apache)
-  if ss -tlnp 2>/dev/null | grep -q ":80 "; then
-    note "Demande manuelle du certificat quand DNS OK:"
-    note "  certbot --apache -d ${HOSTNAME_FQDN} -d www.${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+  # --- Mode wildcard via DNS OVH ---
+  if $CERTBOT_WILDCARD; then
+    log "Mode wildcard activé — installation du plugin DNS OVH..."
+
+    # Installer certbot-dns-ovh (pas dans les dépôts Debian 13)
+    if ! python3 -c "import certbot_dns_ovh" 2>/dev/null; then
+      pip3 install --break-system-packages certbot-dns-ovh 2>&1 | tee -a "$LOG_FILE"
+    fi
+
+    # Demander les credentials OVH si pas encore fournis (mode --reconfigure)
+    if [[ ! -f "${OVH_DNS_CREDENTIALS}" ]]; then
+      if [[ -z "${OVH_APP_KEY:-}" || -z "${OVH_APP_SECRET:-}" || -z "${OVH_CONSUMER_KEY:-}" ]]; then
+        section "Credentials API OVH (pour certificat wildcard)"
+        echo "Un certificat wildcard nécessite la validation DNS-01 via l'API OVH."
+        echo ""
+        echo "Si vous n'avez pas encore de credentials, créez-les sur :"
+        echo "  ${BOLD}https://eu.api.ovh.com/createToken/${RESET}"
+        echo ""
+        echo "Droits requis :"
+        echo "  GET    /domain/zone/*"
+        echo "  POST   /domain/zone/*"
+        echo "  DELETE /domain/zone/*"
+        echo ""
+        OVH_APP_KEY="$(prompt_default "Application Key" "")"
+        OVH_APP_SECRET="$(prompt_default "Application Secret" "")"
+        OVH_CONSUMER_KEY="$(prompt_default "Consumer Key" "")"
+      fi
+
+      if [[ -n "${OVH_APP_KEY:-}" && -n "${OVH_APP_SECRET:-}" && -n "${OVH_CONSUMER_KEY:-}" ]]; then
+        cat > "${OVH_DNS_CREDENTIALS}" <<OVHCREDS
+dns_ovh_endpoint = ${OVH_API_ENDPOINT}
+dns_ovh_application_key = ${OVH_APP_KEY}
+dns_ovh_application_secret = ${OVH_APP_SECRET}
+dns_ovh_consumer_key = ${OVH_CONSUMER_KEY}
+OVHCREDS
+        chmod 600 "${OVH_DNS_CREDENTIALS}"
+        log "Credentials OVH sauvegardés dans ${OVH_DNS_CREDENTIALS} (mode 600)"
+      else
+        warn "Credentials OVH manquants. Certificat wildcard impossible."
+        warn "Créez ${OVH_DNS_CREDENTIALS} manuellement puis relancez certbot."
+      fi
+    else
+      log "Credentials OVH existants (${OVH_DNS_CREDENTIALS})"
+    fi
+
+    # Demander le certificat wildcard si les credentials sont en place
+    if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
+      if [[ -d "/etc/letsencrypt/live/${HOSTNAME_FQDN}" ]]; then
+        # Vérifier si le cert actuel couvre déjà le wildcard
+        if openssl x509 -in "/etc/letsencrypt/live/${HOSTNAME_FQDN}/cert.pem" -noout -text 2>/dev/null | grep -q "\\*.${HOSTNAME_FQDN}"; then
+          log "Certificat wildcard existant pour ${HOSTNAME_FQDN} — pas de nouvelle demande."
+        else
+          warn "Certificat existant mais sans wildcard. Remplacement..."
+          certbot certonly \
+            --dns-ovh \
+            --dns-ovh-credentials "${OVH_DNS_CREDENTIALS}" \
+            --dns-ovh-propagation-seconds "${CERTBOT_DNS_PROPAGATION}" \
+            -d "${HOSTNAME_FQDN}" \
+            -d "*.${HOSTNAME_FQDN}" \
+            --email "${EMAIL_FOR_CERTBOT}" \
+            --agree-tos \
+            --non-interactive \
+            --force-renewal \
+            2>&1 | tee -a "$LOG_FILE"
+        fi
+      else
+        log "Demande du certificat wildcard pour ${HOSTNAME_FQDN} + *.${HOSTNAME_FQDN}..."
+        certbot certonly \
+          --dns-ovh \
+          --dns-ovh-credentials "${OVH_DNS_CREDENTIALS}" \
+          --dns-ovh-propagation-seconds "${CERTBOT_DNS_PROPAGATION}" \
+          -d "${HOSTNAME_FQDN}" \
+          -d "*.${HOSTNAME_FQDN}" \
+          --email "${EMAIL_FOR_CERTBOT}" \
+          --agree-tos \
+          --non-interactive \
+          2>&1 | tee -a "$LOG_FILE"
+      fi
+    fi
+
+  # --- Mode classique (HTTP-01) ---
   else
-    warn "Apache n'écoute pas sur le port 80 (probablement derrière un reverse proxy)."
-    note "Utilisez le mode standalone ou webroot pour obtenir le certificat :"
-    note "  certbot certonly --standalone -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
-    note "  ou: certbot certonly --webroot -w /var/www/html -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+    if ss -tlnp 2>/dev/null | grep -q ":80 "; then
+      note "Demande manuelle du certificat quand DNS OK:"
+      note "  certbot --apache -d ${HOSTNAME_FQDN} -d www.${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+    else
+      warn "Apache n'écoute pas sur le port 80 (probablement derrière un reverse proxy)."
+      note "Utilisez le mode standalone ou webroot pour obtenir le certificat :"
+      note "  certbot certonly --standalone -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+      note "  ou: certbot certonly --webroot -w /var/www/html -d ${HOSTNAME_FQDN} --email ${EMAIL_FOR_CERTBOT} --agree-tos -n"
+    fi
   fi
 
   # Hook de renouvellement (rechargement Apache après renouvellement)

@@ -252,6 +252,15 @@ verify_web() {
           else
             emit_check fail "SSL : certificat expiré !"
           fi
+
+          # Vérifier la couverture wildcard
+          if $CERTBOT_WILDCARD; then
+            if openssl x509 -in "$cert_file" -noout -text 2>/dev/null | grep -q "\\*.${HOSTNAME_FQDN}"; then
+              emit_check ok "SSL : certificat wildcard *.${HOSTNAME_FQDN} actif"
+            else
+              emit_check warn "SSL : certificat sans wildcard (*.${HOSTNAME_FQDN} absent)"
+            fi
+          fi
         fi
       else
         emit_check warn "SSL : certificat Let's Encrypt non trouvé pour ${HOSTNAME_FQDN}"
@@ -269,6 +278,27 @@ verify_web() {
         emit_check ok "SSL : hook de renouvellement Apache présent"
       else
         emit_check warn "SSL : hook de renouvellement Apache absent"
+      fi
+
+      # Credentials OVH (pour wildcard)
+      if $CERTBOT_WILDCARD; then
+        if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
+          local ovh_perms
+          ovh_perms=$(stat -c %a "${OVH_DNS_CREDENTIALS}" 2>/dev/null)
+          if [[ "$ovh_perms" == "600" ]]; then
+            emit_check ok "SSL : credentials OVH présents (mode 600)"
+          else
+            emit_check warn "SSL : credentials OVH permissions ${ovh_perms} (attendu: 600)"
+          fi
+          # Vérifier que le renewal config utilise dns-ovh
+          if grep -q "authenticator = dns-ovh" "/etc/letsencrypt/renewal/${HOSTNAME_FQDN}.conf" 2>/dev/null; then
+            emit_check ok "SSL : renouvellement configuré via DNS OVH"
+          else
+            emit_check warn "SSL : renouvellement non configuré via DNS OVH"
+          fi
+        else
+          emit_check fail "SSL : credentials OVH absents (${OVH_DNS_CREDENTIALS})"
+        fi
       fi
     fi
   fi

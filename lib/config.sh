@@ -35,7 +35,7 @@ CONFIG_VARS=(
   "INSTALL_LOCALES|bool"  "INSTALL_SSH_HARDEN|bool"  "INSTALL_UFW|bool"
   "GEOIP_BLOCK|bool"  "INSTALL_FAIL2BAN|bool"  "INSTALL_APACHE_PHP|bool"
   "PHP_DISABLE_FUNCTIONS|bool"  "INSTALL_MARIADB|bool"  "INSTALL_PHPMYADMIN|bool"
-  "INSTALL_POSTFIX_DKIM|bool"  "INSTALL_CERTBOT|bool"  "INSTALL_DEVTOOLS|bool"
+  "INSTALL_POSTFIX_DKIM|bool"  "INSTALL_CERTBOT|bool"  "CERTBOT_WILDCARD|bool"  "INSTALL_DEVTOOLS|bool"
   "INSTALL_NODE|bool"  "INSTALL_RUST|bool"  "INSTALL_PYTHON3|bool"
   "INSTALL_COMPOSER|bool"  "INSTALL_SYMFONY|bool"  "INSTALL_SHELL_FUN|bool"
   "INSTALL_YTDL|bool"  "INSTALL_CLAMAV|bool"  "INSTALL_RKHUNTER|bool"
@@ -49,7 +49,7 @@ declare -A MODULE_DEFAULTS=(
   [INSTALL_LOCALES]=true  [INSTALL_SSH_HARDEN]=true  [INSTALL_UFW]=true
   [GEOIP_BLOCK]=false  [INSTALL_FAIL2BAN]=true  [INSTALL_APACHE_PHP]=true
   [PHP_DISABLE_FUNCTIONS]=true  [INSTALL_MARIADB]=true  [INSTALL_PHPMYADMIN]=true
-  [INSTALL_POSTFIX_DKIM]=true  [INSTALL_CERTBOT]=true  [INSTALL_DEVTOOLS]=true
+  [INSTALL_POSTFIX_DKIM]=true  [INSTALL_CERTBOT]=true  [CERTBOT_WILDCARD]=false  [INSTALL_DEVTOOLS]=true
   [INSTALL_NODE]=true  [INSTALL_RUST]=true  [INSTALL_PYTHON3]=true
   [INSTALL_COMPOSER]=true  [INSTALL_SYMFONY]=false  [INSTALL_SHELL_FUN]=true
   [INSTALL_YTDL]=false  [INSTALL_CLAMAV]=true  [INSTALL_RKHUNTER]=true
@@ -118,6 +118,7 @@ ask_missing_options() {
     "INSTALL_SSH_ALERT|Activer les alertes email à chaque connexion SSH ?|y"
     "INSTALL_AIDE|Installer AIDE (détection modifications fichiers) ?|y"
     "INSTALL_MODSEC_CRS|Installer les règles OWASP CRS pour ModSecurity ?|y"
+    "CERTBOT_WILDCARD|Certificat wildcard via DNS OVH (nécessite credentials API) ?|n"
     "MODSEC_ENFORCE|Activer ModSecurity en mode blocage (On) au lieu de DetectionOnly ?|n"
     "SECURE_TMP|Sécuriser /tmp (noexec, nosuid, nodev) ?|y"
     "INSTALL_BASHRC_GLOBAL|Déployer le .bashrc commun pour tous les utilisateurs ?|y"
@@ -242,7 +243,31 @@ ask_all_questions() {
   INSTALL_POSTFIX_DKIM=true
   prompt_yes_no "Installer Postfix (send-only) + OpenDKIM ?" "y" || INSTALL_POSTFIX_DKIM=false
   INSTALL_CERTBOT=true
-  prompt_yes_no "Installer Certbot (Let's Encrypt) + module Apache ?" "y" || INSTALL_CERTBOT=false
+  prompt_yes_no "Installer Certbot (Let's Encrypt) ?" "y" || INSTALL_CERTBOT=false
+  CERTBOT_WILDCARD=false
+  if $INSTALL_CERTBOT; then
+    if prompt_yes_no "Certificat wildcard (*.${HOSTNAME_FQDN}) via DNS OVH ? (sinon HTTP classique)" "n"; then
+      CERTBOT_WILDCARD=true
+      section "Credentials API OVH (pour certificat wildcard)"
+      echo "Un certificat wildcard nécessite la validation DNS-01 via l'API OVH."
+      echo ""
+      echo "Si vous n'avez pas encore de credentials, créez-les sur :"
+      echo "  ${BOLD}https://eu.api.ovh.com/createToken/${RESET}"
+      echo ""
+      echo "Droits requis :"
+      echo "  GET    /domain/zone/*"
+      echo "  POST   /domain/zone/*"
+      echo "  DELETE /domain/zone/*"
+      echo ""
+      OVH_APP_KEY="$(prompt_default "Application Key" "")"
+      OVH_APP_SECRET="$(prompt_default "Application Secret" "")"
+      OVH_CONSUMER_KEY="$(prompt_default "Consumer Key" "")"
+      if [[ -z "$OVH_APP_KEY" || -z "$OVH_APP_SECRET" || -z "$OVH_CONSUMER_KEY" ]]; then
+        warn "Credentials OVH incomplets. Le certificat wildcard sera ignoré."
+        CERTBOT_WILDCARD=false
+      fi
+    fi
+  fi
   INSTALL_DEVTOOLS=true
   prompt_yes_no "Installer Git/Curl/build-essential/grc ?" "y" || INSTALL_DEVTOOLS=false
   INSTALL_NODE=true
