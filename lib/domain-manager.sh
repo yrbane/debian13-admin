@@ -460,3 +460,135 @@ dm_check_domain() {
 
   emit_section_close
 }
+
+# ==============================================================================
+# Export / Import de domaines
+# ==============================================================================
+
+# Exporter un domaine vers une archive tar.gz
+# $1 = domain, $2 = destination directory
+# Crée $dest/$domain.tar.gz contenant : manifest, dkim/, apache/, logrotate/, www/
+dm_export_domain() {
+  local domain="$1" dest_dir="${2:-.}"
+  local selector
+
+  if ! dm_domain_exists "$domain"; then
+    warn "Export: le domaine ${domain} n'est pas enregistré"
+    return 1
+  fi
+
+  selector=$(dm_get_selector "$domain")
+
+  local staging
+  staging=$(mktemp -d)
+  local archive="${dest_dir}/${domain}.tar.gz"
+  mkdir -p "$dest_dir"
+
+  # Manifest
+  cat > "${staging}/manifest.conf" <<EOF
+DOMAIN=${domain}
+SELECTOR=${selector}
+EXPORT_DATE=$(date +%Y-%m-%d_%H%M%S)
+EOF
+
+  # DKIM keys
+  if [[ -d "${DKIM_KEYDIR}/${domain}" ]]; then
+    mkdir -p "${staging}/dkim"
+    cp -a "${DKIM_KEYDIR}/${domain}"/. "${staging}/dkim/"
+  fi
+
+  # VHosts Apache
+  local found_vhosts=false
+  for pattern in "000-${domain}-redirect.conf" "010-${domain}.conf" "020-${domain}-wildcard.conf"; do
+    if [[ -f "${APACHE_SITES_DIR}/${pattern}" ]]; then
+      found_vhosts=true
+      mkdir -p "${staging}/apache"
+      cp "${APACHE_SITES_DIR}/${pattern}" "${staging}/apache/"
+    fi
+  done
+
+  # Logrotate
+  if [[ -f "${LOGROTATE_DIR}/apache-vhost-${domain}" ]]; then
+    mkdir -p "${staging}/logrotate"
+    cp "${LOGROTATE_DIR}/apache-vhost-${domain}" "${staging}/logrotate/"
+  fi
+
+  # Web root
+  if [[ -d "${WEB_ROOT}/${domain}" ]]; then
+    cp -a "${WEB_ROOT}/${domain}" "${staging}/www-root"
+    # Rename to relative: www-root contains the domain's web tree
+    mv "${staging}/www-root" "${staging}/www"
+  fi
+
+  tar czf "$archive" -C "$staging" .
+  rm -rf "$staging"
+
+  log "Export: ${domain} -> ${archive}"
+}
+
+# Importer un domaine depuis une archive tar.gz
+# $1 = path to archive
+dm_import_domain() {
+  local archive="$1"
+
+  if [[ ! -f "$archive" ]]; then
+    warn "Import: archive introuvable: ${archive}"
+    return 1
+  fi
+
+  # Extract to temporary directory
+  local staging
+  staging=$(mktemp -d)
+  tar xzf "$archive" -C "$staging" 2>/dev/null || { warn "Import: archive corrompue"; rm -rf "$staging"; return 1; }
+
+  # Read manifest
+  if [[ ! -f "${staging}/manifest.conf" ]]; then
+    warn "Import: manifest.conf manquant dans l'archive"
+    rm -rf "$staging"
+    return 1
+  fi
+
+  local domain selector
+  domain=$(grep "^DOMAIN=" "${staging}/manifest.conf" | cut -d= -f2)
+  selector=$(grep "^SELECTOR=" "${staging}/manifest.conf" | cut -d= -f2)
+
+  if [[ -z "$domain" ]]; then
+    warn "Import: DOMAIN manquant dans manifest.conf"
+    rm -rf "$staging"
+    return 1
+  fi
+
+  if dm_domain_exists "$domain"; then
+    warn "Import: le domaine ${domain} est déjà enregistré (désinscrire d'abord)"
+    rm -rf "$staging"
+    return 1
+  fi
+
+  # Register domain
+  dm_register_domain "$domain" "${selector:-mail}"
+
+  # Restore DKIM keys
+  if [[ -d "${staging}/dkim" ]]; then
+    mkdir -p "${DKIM_KEYDIR}/${domain}"
+    cp -a "${staging}/dkim"/. "${DKIM_KEYDIR}/${domain}/"
+  fi
+
+  # Restore VHosts
+  if [[ -d "${staging}/apache" ]]; then
+    cp "${staging}/apache"/*.conf "${APACHE_SITES_DIR}/" 2>/dev/null || true
+  fi
+
+  # Restore logrotate
+  if [[ -d "${staging}/logrotate" ]]; then
+    cp "${staging}/logrotate"/* "${LOGROTATE_DIR}/" 2>/dev/null || true
+  fi
+
+  # Restore web root
+  if [[ -d "${staging}/www" ]]; then
+    mkdir -p "${WEB_ROOT}/${domain}"
+    cp -a "${staging}/www"/. "${WEB_ROOT}/${domain}/"
+  fi
+
+  rm -rf "$staging"
+  log "Import: ${domain} restauré depuis ${archive}"
+}

@@ -106,6 +106,9 @@ show_help() {
   printf "  ${GREEN}--domain-check [dom]${RESET}      Vérifier la configuration d'un domaine (DNS, DKIM,\n"
   printf "                            SPF, DMARC, SSL, VHost). Sans argument : vérifie\n"
   printf "                            tous les domaines enregistrés.\n"
+  printf "  ${GREEN}--domain-export <dom>${RESET}    Exporter un domaine vers une archive tar.gz.\n"
+  printf "                            Contient : DKIM, VHosts, logrotate, fichiers web.\n"
+  printf "  ${GREEN}--domain-import <arch>${RESET}   Importer un domaine depuis une archive tar.gz.\n"
   printf "  ${GREEN}--backup${RESET}                  Sauvegarde complète (configs, DKIM, MariaDB, cron).\n"
   printf "  ${GREEN}--backup-list${RESET}             Lister les sauvegardes disponibles.\n"
   printf "\n"
@@ -188,6 +191,8 @@ DOMAIN_REMOVE=""
 DOMAIN_LIST_MODE=false
 DOMAIN_CHECK=""
 DOMAIN_CHECK_ALL=false
+DOMAIN_EXPORT=""
+DOMAIN_IMPORT=""
 BACKUP_MODE=false
 BACKUP_LIST_MODE=false
 while [[ $# -gt 0 ]]; do
@@ -210,6 +215,14 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$DOMAIN_REMOVE" ]] && die "--domain-remove nécessite un nom de domaine."
       ;;
     --domain-list) DOMAIN_LIST_MODE=true ;;
+    --domain-export)
+      shift; DOMAIN_EXPORT="${1:-}"
+      [[ -z "$DOMAIN_EXPORT" ]] && die "--domain-export nécessite un nom de domaine."
+      ;;
+    --domain-import)
+      shift; DOMAIN_IMPORT="${1:-}"
+      [[ -z "$DOMAIN_IMPORT" ]] && die "--domain-import nécessite un chemin vers l'archive."
+      ;;
     --backup) BACKUP_MODE=true ;;
     --backup-list) BACKUP_LIST_MODE=true ;;
     --domain-check)
@@ -232,7 +245,7 @@ fi
 
 # Détection mode domain-*
 DOMAIN_MODE=false
-if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" ]]; then
+if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" || -n "$DOMAIN_EXPORT" || -n "$DOMAIN_IMPORT" ]]; then
   DOMAIN_MODE=true
 fi
 
@@ -805,6 +818,32 @@ if [[ -n "$DOMAIN_REMOVE" ]]; then
   print_note "  SSL:  /etc/letsencrypt/live/${DOMAIN_REMOVE}/"
   print_note "  Web:  ${WEB_ROOT:-/var/www}/${DOMAIN_REMOVE}/"
   echo ""
+  exit 0
+fi
+
+# --- --domain-export ---
+if [[ -n "$DOMAIN_EXPORT" ]]; then
+  section "Export du domaine : ${DOMAIN_EXPORT}"
+  local_export_dir="${PWD}"
+  dm_export_domain "$DOMAIN_EXPORT" "$local_export_dir"
+  log "Archive créée : ${local_export_dir}/${DOMAIN_EXPORT}.tar.gz"
+  exit 0
+fi
+
+# --- --domain-import ---
+if [[ -n "$DOMAIN_IMPORT" ]]; then
+  section "Import de domaine depuis : ${DOMAIN_IMPORT}"
+  dm_import_domain "$DOMAIN_IMPORT"
+  # Rebuild OpenDKIM tables
+  dm_rebuild_opendkim
+  # Enable VHosts if apache available
+  local_imported_domain=$(tar xzf "$DOMAIN_IMPORT" -O ./manifest.conf 2>/dev/null | grep "^DOMAIN=" | cut -d= -f2)
+  if [[ -n "$local_imported_domain" ]] && command -v a2ensite >/dev/null 2>&1; then
+    a2ensite "000-${local_imported_domain}-redirect.conf" 2>/dev/null || true
+    a2ensite "010-${local_imported_domain}.conf" 2>/dev/null || true
+    systemctl reload apache2 2>/dev/null || true
+  fi
+  log "Domaine importé. Vérifiez avec : sudo $0 --domain-check ${local_imported_domain:-}"
   exit 0
 fi
 
