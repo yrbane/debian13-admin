@@ -70,6 +70,8 @@ source "${LIB_DIR}/ovh-api.sh"
 source "${LIB_DIR}/domain-manager.sh"
 # shellcheck source=lib/backup.sh
 source "${LIB_DIR}/backup.sh"
+# shellcheck source=lib/hooks.sh
+source "${LIB_DIR}/hooks.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -659,7 +661,9 @@ fi
 
 if $BACKUP_MODE; then
   section "Sauvegarde complète"
+  run_hooks "pre-backup"
   backup_full
+  run_hooks "post-backup" "$BACKUP_DEST"
   exit 0
 fi
 
@@ -689,6 +693,7 @@ fi
 if [[ -n "$DOMAIN_ADD" ]]; then
   section "Ajout du domaine : ${DOMAIN_ADD}"
   local_selector="${DOMAIN_ADD_SELECTOR:-mail}"
+  run_hooks "pre-domain-add" "$DOMAIN_ADD" "$local_selector"
 
   if dm_domain_exists "$DOMAIN_ADD"; then
     warn "Le domaine ${DOMAIN_ADD} est déjà enregistré."
@@ -744,6 +749,8 @@ if [[ -n "$DOMAIN_ADD" ]]; then
   log "Configuration logrotate..."
   dm_deploy_logrotate "$DOMAIN_ADD"
 
+  run_hooks "post-domain-add" "$DOMAIN_ADD" "$local_selector"
+
   # Récap
   echo ""
   section "Récapitulatif — ${DOMAIN_ADD}"
@@ -781,6 +788,7 @@ if [[ -n "$DOMAIN_REMOVE" ]]; then
   fi
 
   # Suppression
+  run_hooks "pre-domain-remove" "$DOMAIN_REMOVE"
   dm_remove_vhosts "$DOMAIN_REMOVE"
   dm_remove_logrotate "$DOMAIN_REMOVE"
   dm_unregister_domain "$DOMAIN_REMOVE"
@@ -790,6 +798,7 @@ if [[ -n "$DOMAIN_REMOVE" ]]; then
     systemctl reload apache2 2>/dev/null || true
   fi
 
+  run_hooks "post-domain-remove" "$DOMAIN_REMOVE"
   log "Domaine ${DOMAIN_REMOVE} supprimé."
   warn "Fichiers conservés (nettoyage manuel si nécessaire) :"
   print_note "  DKIM: ${DKIM_KEYDIR}/${DOMAIN_REMOVE}/"
@@ -825,6 +834,7 @@ fi
 
 # ================================== INSTALLATION ======================================
 if ! $AUDIT_MODE; then
+  run_hooks "pre-install"
   apt_update_upgrade
 
   # shellcheck source=lib/install-base.sh
@@ -835,6 +845,7 @@ if ! $AUDIT_MODE; then
   source "${LIB_DIR}/install-devtools.sh"
   # shellcheck source=lib/install-security.sh
   source "${LIB_DIR}/install-security.sh"
+  run_hooks "post-install"
 fi
 
 # ================================== VÉRIFICATIONS (exécution CLI) =====================
@@ -1072,6 +1083,13 @@ print_note "Sauvegarde complète (configs, DKIM, MariaDB, cron) :"
 print_cmd "sudo ${0} --backup"
 print_note "Lister les sauvegardes :"
 print_cmd "sudo ${0} --backup-list"
+echo ""
+
+print_title "Hooks / Plugins"
+print_note "Répertoire : ${HOOKS_DIR}"
+print_note "Événements : pre-install, post-install, pre-backup, post-backup,"
+print_note "  pre-domain-add, post-domain-add, pre-domain-remove, post-domain-remove"
+print_note "Nommer les scripts : <événement>-<description>.sh (chmod +x)"
 echo ""
 
 print_dns_actions
