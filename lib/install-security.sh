@@ -260,6 +260,21 @@ if $INSTALL_APPARMOR; then
   log "AppArmor activé avec profils locaux pour Apache, MariaDB et Postfix"
 fi
 
+# ---------------------------------- 14g2) auditd ------------------------------------
+if $INSTALL_AUDITD; then
+  section "auditd (audit de sécurité)"
+  apt_install auditd audispd-plugins
+
+  systemctl enable --now auditd || true
+
+  deploy_auditd_rules
+
+  # Recharger les règles
+  augenrules --load 2>/dev/null || auditctl -R "${AUDIT_RULES_DIR:-/etc/audit/rules.d}/99-server-hardening.rules" 2>/dev/null || true
+
+  log "auditd activé avec règles de hardening"
+fi
+
 # ---------------------------------- 14h) Secure /tmp ----------------------------------
 if $SECURE_TMP; then
   section "Sécurisation /tmp (noexec, nosuid, nodev)"

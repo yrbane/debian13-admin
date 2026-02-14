@@ -313,3 +313,44 @@ EOF
 
   log "AppArmor: profils locaux déployés (Apache, MariaDB, Postfix)"
 }
+
+# ---------------------------------- auditd rules ------------------------------------
+
+# Déployer les règles auditd pour le hardening serveur
+# Utilise AUDIT_RULES_DIR (overridable pour les tests)
+deploy_auditd_rules() {
+  local rules_dir="${AUDIT_RULES_DIR:-/etc/audit/rules.d}"
+  mkdir -p "$rules_dir"
+
+  cat > "${rules_dir}/99-server-hardening.rules" <<'EOF'
+# === Identity & authentication files ===
+-w /etc/passwd -p wa -k identity
+-w /etc/shadow -p wa -k identity
+-w /etc/group -p wa -k identity
+-w /etc/gshadow -p wa -k identity
+
+# === SSH configuration & keys ===
+-w /etc/ssh/sshd_config -p wa -k sshd_config
+-w /root/.ssh/authorized_keys -p wa -k ssh_keys
+-w /home/ -p wa -k ssh_keys
+
+# === Privilege escalation ===
+-w /etc/sudoers -p wa -k privilege
+-w /etc/sudoers.d/ -p wa -k privilege
+-a always,exit -F arch=b64 -S execve -F euid=0 -F auid>=1000 -F auid!=4294967295 -k privilege_exec
+
+# === Cron jobs ===
+-w /etc/crontab -p wa -k cron
+-w /etc/cron.d/ -p wa -k cron
+-w /var/spool/cron/ -p wa -k cron
+
+# === Network configuration ===
+-w /etc/hosts -p wa -k network
+-w /etc/resolv.conf -p wa -k network
+
+# === System startup ===
+-w /etc/systemd/ -p wa -k systemd
+EOF
+
+  log "auditd: règles de hardening déployées"
+}

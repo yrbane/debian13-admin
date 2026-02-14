@@ -1257,3 +1257,26 @@ verify_apparmor() {
 
   emit_section_close
 }
+
+# ---------------------------------- auditd ------------------------------------------
+verify_auditd() {
+  emit_section "auditd"
+
+  local auditd_active
+  if systemctl is-active auditd >/dev/null 2>&1; then
+    emit_check ok "auditd : service actif"
+  else
+    emit_check warn "auditd : service inactif"
+    emit_section_close
+    return
+  fi
+
+  local rules_file="${AUDIT_RULES_DIR:-/etc/audit/rules.d}/99-server-hardening.rules"
+  if [[ -f "$rules_file" ]]; then
+    emit_check ok "auditd : règles de hardening présentes"
+  else
+    emit_check warn "auditd : règles de hardening absentes"
+  fi
+
+  emit_section_close
+}
