@@ -1,0 +1,691 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>debian13-server — Bootstrap, Hardening & Multi-domaines</title>
+    <meta name="description" content="Bootstrap, hardening et gestion multi-domaines pour Debian 13 (Trixie) chez OVH. Un seul script, idempotent, testable, modulaire.">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+        :root {
+            --bg: #0a1628;
+            --bg-alt: #0f1d32;
+            --surface: #142136;
+            --accent: #dc5c3b;
+            --accent-glow: rgba(220, 92, 59, 0.4);
+            --cyan: #6bdbdb;
+            --cyan-glow: rgba(107, 219, 219, 0.3);
+            --green: #99c454;
+            --purple: #a855f7;
+            --amber: #f59e0b;
+            --red: #ef4444;
+            --blue: #3b82f6;
+            --indigo: #6366f1;
+            --teal: #14b8a6;
+            --slate: #64748b;
+            --text: #e2e8f0;
+            --text-dim: #94a3b8;
+            --text-muted: #64748b;
+            --border: rgba(107, 219, 219, 0.08);
+            --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            --mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        html { scroll-behavior: smooth; }
+        body { font-family: var(--font); color: var(--text); background: var(--bg); line-height: 1.6; overflow-x: hidden; }
+        .container { max-width: 1100px; margin: 0 auto; padding: 0 24px; }
+
+        /* ---- NAV ---- */
+        nav {
+            position: fixed; top: 0; left: 0; right: 0; z-index: 100;
+            padding: 16px 0;
+            background: rgba(10, 22, 40, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--border);
+        }
+        nav .container { display: flex; align-items: center; justify-content: space-between; }
+        nav .logo { font-weight: 700; font-size: 18px; color: var(--text); text-decoration: none; }
+        nav .logo span { color: var(--accent); }
+        nav .links { display: flex; gap: 28px; }
+        nav .links a { color: var(--text-dim); text-decoration: none; font-size: 14px; font-weight: 500; transition: color 0.2s; }
+        nav .links a:hover { color: var(--cyan); }
+
+        /* ---- HERO ---- */
+        .hero {
+            min-height: 100vh;
+            display: flex; align-items: center; justify-content: center;
+            text-align: center;
+            position: relative;
+            background: linear-gradient(160deg, #0a1628 0%, #142136 30%, #0f2847 60%, #0a1628 100%);
+            background-size: 300% 300%;
+            animation: gradientShift 20s ease infinite;
+        }
+        .hero::before {
+            content: '';
+            position: absolute; inset: 0;
+            background-image:
+                linear-gradient(rgba(107, 219, 219, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(107, 219, 219, 0.03) 1px, transparent 1px);
+            background-size: 60px 60px;
+            mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, black 30%, transparent 100%);
+            -webkit-mask-image: radial-gradient(ellipse 80% 70% at 50% 50%, black 30%, transparent 100%);
+        }
+        @keyframes gradientShift {
+            0%, 100% { background-position: 0% 50%; }
+            50% { background-position: 100% 50%; }
+        }
+        .hero-content { position: relative; z-index: 1; padding: 120px 24px 80px; }
+        .hero h1 {
+            font-size: clamp(42px, 6vw, 72px);
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            margin-bottom: 16px;
+            background: linear-gradient(135deg, var(--text) 0%, var(--cyan) 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .hero .subtitle { font-size: clamp(16px, 2.5vw, 22px); color: var(--text-dim); font-weight: 400; margin-bottom: 8px; }
+        .hero .subtitle-sm { font-size: 15px; color: var(--text-muted); font-style: italic; margin-bottom: 32px; }
+
+        .badges { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; margin-bottom: 24px; }
+        .badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            padding: 6px 14px; border-radius: 20px;
+            font-size: 13px; font-weight: 600;
+            border: 1px solid transparent;
+        }
+        .badge.bash { background: rgba(78, 170, 37, 0.15); border-color: rgba(78, 170, 37, 0.3); color: #4EAA25; }
+        .badge.debian { background: rgba(168, 29, 51, 0.15); border-color: rgba(168, 29, 51, 0.3); color: #e25572; }
+        .badge.ovh { background: rgba(0, 14, 156, 0.2); border-color: rgba(59, 130, 246, 0.3); color: #6b9dfc; }
+        .badge.tests { background: rgba(0, 200, 83, 0.12); border-color: rgba(0, 200, 83, 0.3); color: #00C853; }
+
+        .hero-cmd {
+            display: inline-block;
+            background: rgba(20, 33, 54, 0.8);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 16px 32px;
+            font-family: var(--mono);
+            font-size: clamp(14px, 2vw, 16px);
+            color: var(--cyan);
+            margin: 24px 0;
+        }
+        .hero-cmd::before { content: '$ '; color: var(--text-muted); }
+        .hero .tagline { font-size: 15px; color: var(--text-muted); margin-top: 16px; }
+
+        .cta {
+            display: inline-flex; align-items: center; gap: 8px;
+            margin-top: 32px; padding: 12px 28px;
+            background: var(--accent); color: #fff;
+            text-decoration: none; border-radius: 8px;
+            font-weight: 600; font-size: 15px;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 20px var(--accent-glow);
+        }
+        .cta:hover { background: #e8744f; transform: translateY(-2px); box-shadow: 0 8px 30px var(--accent-glow); }
+
+        /* ---- STATS ---- */
+        .stats {
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            border-bottom: 1px solid var(--border);
+            padding: 40px 0;
+        }
+        .stats .container { display: flex; justify-content: center; gap: 48px; flex-wrap: wrap; }
+        .stat { text-align: center; }
+        .stat-num { font-size: 32px; font-weight: 800; color: var(--cyan); }
+        .stat-label { font-size: 13px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; margin-top: 4px; }
+
+        /* ---- SECTIONS ---- */
+        section { padding: 100px 0; }
+        section h2 { font-size: clamp(28px, 4vw, 36px); font-weight: 700; margin-bottom: 16px; text-align: center; }
+        section .section-desc { text-align: center; color: var(--text-dim); max-width: 600px; margin: 0 auto 48px; font-size: 16px; }
+        section .section-desc strong { color: var(--text); }
+
+        /* ---- FEATURES GRID ---- */
+        .features-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 20px; }
+        .feature-card {
+            background: rgba(20, 33, 54, 0.5);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            transition: all 0.3s ease;
+        }
+        .feature-card:hover {
+            border-color: rgba(107, 219, 219, 0.2);
+            transform: translateY(-4px);
+            box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3);
+        }
+        .feature-card .card-icon { font-size: 28px; margin-bottom: 12px; }
+        .feature-card h3 { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
+        .feature-card ul { list-style: none; }
+        .feature-card li {
+            padding: 6px 0; font-size: 14px; color: var(--text-dim);
+            display: flex; align-items: baseline; gap: 8px;
+        }
+        .feature-card li strong { color: var(--text); white-space: nowrap; }
+        .feature-card li::before { content: '\25B8'; color: var(--cyan); font-size: 12px; flex-shrink: 0; }
+        .feature-card.security { border-top: 3px solid var(--red); }
+        .feature-card.web { border-top: 3px solid var(--blue); }
+        .feature-card.system { border-top: 3px solid var(--green); }
+        .feature-card.email { border-top: 3px solid var(--purple); }
+
+        /* ---- PIPELINE ---- */
+        .domains-section { background: var(--bg-alt); }
+        .pipeline-wrap { overflow-x: auto; padding: 20px 0; }
+        .pipeline {
+            display: flex; align-items: center; justify-content: center;
+            gap: 0; min-width: 720px; padding: 20px 0;
+        }
+        .pipe-step { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+        .pipe-circle {
+            width: 52px; height: 52px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 22px; transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+        }
+        .pipe-circle:hover { transform: scale(1.15); }
+        .pipe-label { font-size: 11px; font-weight: 600; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.04em; }
+        .pipe-arrow {
+            width: 28px; height: 2px;
+            background: var(--text-muted);
+            position: relative; margin: 0 2px; margin-bottom: 22px;
+        }
+        .pipe-arrow::after {
+            content: ''; position: absolute; right: -4px; top: -3px;
+            border: solid var(--text-muted); border-width: 0 2px 2px 0;
+            padding: 3px; transform: rotate(-45deg);
+        }
+
+        .pipeline-detail { max-width: 800px; margin: 32px auto 0; }
+        .pipeline-detail table { width: 100%; border-collapse: collapse; }
+        .pipeline-detail th, .pipeline-detail td {
+            padding: 10px 16px; text-align: left; font-size: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+        .pipeline-detail th { color: var(--text-muted); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.06em; }
+        .pipeline-detail td code {
+            font-family: var(--mono); font-size: 13px; color: var(--cyan);
+            background: rgba(107, 219, 219, 0.08); padding: 2px 6px; border-radius: 4px;
+        }
+        .pipeline-detail td:first-child { color: var(--text-muted); font-weight: 700; text-align: center; width: 40px; }
+
+        .note-box {
+            max-width: 800px; margin: 24px auto 0;
+            padding: 16px 20px;
+            background: rgba(59, 130, 246, 0.08);
+            border-left: 3px solid var(--blue);
+            border-radius: 0 8px 8px 0;
+            font-size: 14px; color: var(--text-dim);
+        }
+        .note-box strong { color: var(--text); }
+        .note-box code {
+            font-family: var(--mono); color: var(--cyan);
+            background: rgba(107,219,219,0.08); padding: 2px 6px; border-radius: 4px;
+        }
+
+        /* ---- DEFENSE LAYERS ---- */
+        .layers { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 6px; }
+        .layer {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 14px 20px; border-radius: 10px;
+            font-size: 14px; transition: all 0.3s ease; cursor: default;
+        }
+        .layer:hover { transform: translateX(8px); }
+        .layer-name { font-weight: 700; color: #fff; }
+        .layer-desc { color: rgba(255,255,255,0.7); font-size: 13px; flex: 1; text-align: center; }
+        .layer-tag {
+            font-size: 11px; font-weight: 600; text-transform: uppercase;
+            letter-spacing: 0.06em; padding: 3px 10px; border-radius: 12px;
+            background: rgba(255,255,255,0.15); color: rgba(255,255,255,0.8);
+        }
+
+        .callout-important {
+            max-width: 700px; margin: 32px auto 0;
+            padding: 16px 20px;
+            background: rgba(220, 92, 59, 0.08);
+            border-left: 3px solid var(--accent);
+            border-radius: 0 8px 8px 0;
+            font-size: 15px; color: var(--text-dim); text-align: center;
+        }
+        .callout-important strong { color: var(--accent); }
+
+        /* ---- TERMINAL ---- */
+        .terminals { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 20px; }
+        .terminal {
+            background: #1a1a2e; border-radius: 12px; overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.05);
+        }
+        .terminal-bar {
+            background: #252542; padding: 10px 14px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        .terminal-dot { width: 12px; height: 12px; border-radius: 50%; }
+        .terminal-dot.r { background: #ff5f57; }
+        .terminal-dot.y { background: #febc2e; }
+        .terminal-dot.g { background: #28c840; }
+        .terminal-title { font-size: 12px; color: var(--text-muted); font-family: var(--mono); margin-left: 8px; }
+        .terminal pre {
+            padding: 16px 20px; margin: 0;
+            font-family: var(--mono); font-size: 13px; line-height: 1.8;
+            color: var(--text-dim); overflow-x: auto;
+        }
+        .terminal .cmd { color: var(--cyan); }
+        .terminal .comment { color: var(--text-muted); }
+        .terminal .prompt { color: var(--green); }
+
+        /* ---- TESTS ---- */
+        .tests-section { background: var(--bg-alt); }
+        .tests-hero { text-align: center; margin-bottom: 32px; }
+        .tests-num { font-size: 72px; font-weight: 800; color: var(--green); line-height: 1; }
+        .tests-label { font-size: 16px; color: var(--text-dim); margin-top: 8px; }
+        .test-bar {
+            max-width: 500px; margin: 24px auto 0;
+            height: 8px; border-radius: 4px;
+            background: rgba(153, 196, 84, 0.15); overflow: hidden;
+        }
+        .test-bar-fill {
+            height: 100%; border-radius: 4px;
+            background: linear-gradient(90deg, var(--green), var(--cyan));
+            width: 100%;
+        }
+        .test-bar-fill.animate { animation: fillBar 2s ease-out; }
+        @keyframes fillBar { from { width: 0; } }
+
+        /* ---- FOOTER ---- */
+        footer {
+            padding: 40px 0; text-align: center;
+            border-top: 1px solid var(--border);
+            color: var(--text-muted); font-size: 14px;
+        }
+
+        /* ---- SCROLL REVEAL ---- */
+        .reveal {
+            opacity: 0; transform: translateY(30px);
+            transition: opacity 0.7s ease, transform 0.7s ease;
+        }
+        .reveal.visible { opacity: 1; transform: translateY(0); }
+        .reveal-delay-1 { transition-delay: 0.1s; }
+        .reveal-delay-2 { transition-delay: 0.2s; }
+        .reveal-delay-3 { transition-delay: 0.3s; }
+
+        /* ---- RESPONSIVE ---- */
+        @media (max-width: 768px) {
+            nav .links { display: none; }
+            .stats .container { gap: 20px; }
+            .stat-num { font-size: 24px; }
+            .features-grid { grid-template-columns: 1fr; }
+            .pipeline { min-width: auto; flex-wrap: wrap; justify-content: center; gap: 12px; }
+            .pipe-arrow { display: none; }
+            .layer { flex-direction: column; gap: 4px; text-align: center; }
+            .layer-desc { text-align: center; }
+            .terminals { grid-template-columns: 1fr; }
+            section { padding: 60px 0; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- NAV -->
+<nav>
+    <div class="container">
+        <a href="#" class="logo">&#x1f6e1;&#xfe0f; debian13<span>-server</span></a>
+        <div class="links">
+            <a href="#features">Stack</a>
+            <a href="#domains">Domaines</a>
+            <a href="#architecture">Architecture</a>
+            <a href="#operations">Operations</a>
+            <a href="#tests">Tests</a>
+        </div>
+    </div>
+</nav>
+
+<!-- HERO -->
+<section class="hero">
+    <div class="hero-content">
+        <h1>debian13-server</h1>
+        <p class="subtitle">Bootstrap &middot; Hardening &middot; Multi-domaines</p>
+        <p class="subtitle-sm">Debian 13 (Trixie) &mdash; OVH</p>
+
+        <div class="badges">
+            <span class="badge bash">&#9679; Pure Bash</span>
+            <span class="badge debian">&#9679; Debian 13</span>
+            <span class="badge ovh">&#9679; OVH API</span>
+            <span class="badge tests">&#9679; 465 tests</span>
+        </div>
+
+        <div class="hero-cmd">sudo ./debian13-server.sh</div>
+
+        <p class="tagline">Un script. Un serveur. De zero a production.</p>
+
+        <a href="#features" class="cta">Decouvrir &#8595;</a>
+    </div>
+</section>
+
+<!-- STATS -->
+<div class="stats">
+    <div class="container">
+        <div class="stat"><div class="stat-num">17</div><div class="stat-label">Bibliotheques</div></div>
+        <div class="stat"><div class="stat-num">465</div><div class="stat-label">Tests</div></div>
+        <div class="stat"><div class="stat-num">47</div><div class="stat-label">Fonctions dm_*</div></div>
+        <div class="stat"><div class="stat-num">19</div><div class="stat-label">Verifications</div></div>
+        <div class="stat"><div class="stat-num">0</div><div class="stat-label">Dependances</div></div>
+    </div>
+</div>
+
+<!-- FEATURES -->
+<section id="features">
+    <div class="container">
+        <h2 class="reveal">Stack complete</h2>
+        <p class="section-desc reveal">Tout ce qu'il faut pour un serveur de production securise, en une seule commande.</p>
+
+        <div class="features-grid">
+            <div class="feature-card security reveal">
+                <div class="card-icon">&#x1f512;</div>
+                <h3>Securite reseau</h3>
+                <ul>
+                    <li><strong>SSH</strong> Cle uniquement, port custom, sntrup761 post-quantique</li>
+                    <li><strong>UFW</strong> Deny-all in/out, whitelist stricte</li>
+                    <li><strong>Fail2ban</strong> 3 niveaux : standard, custom, recidive</li>
+                    <li><strong>GeoIP</strong> ipset kernel &mdash; 103 pays bloques</li>
+                </ul>
+            </div>
+
+            <div class="feature-card web reveal reveal-delay-1">
+                <div class="card-icon">&#x1f310;</div>
+                <h3>Stack web</h3>
+                <ul>
+                    <li><strong>Apache</strong> PHP-FPM, mod_security OWASP CRS, headers defensifs</li>
+                    <li><strong>MariaDB</strong> Hardening auto, phpMyAdmin URL aleatoire</li>
+                    <li><strong>SSL</strong> Certbot wildcard DNS-01 (OVH) ou HTTP-01</li>
+                    <li><strong>DNS</strong> SPF, DKIM, DMARC, CAA, TLSA &mdash; auto via HMAC</li>
+                </ul>
+            </div>
+
+            <div class="feature-card system reveal reveal-delay-2">
+                <div class="card-icon">&#x1f6e1;&#xfe0f;</div>
+                <h3>Defense systeme</h3>
+                <ul>
+                    <li><strong>ModSecurity</strong> WAF OWASP CRS (SQLi, XSS, LFI, RCE)</li>
+                    <li><strong>AppArmor</strong> Confinement MAC (Apache, MariaDB, Postfix)</li>
+                    <li><strong>auditd</strong> Journalisation syscalls sensibles</li>
+                    <li><strong>sysctl</strong> ASLR, syncookies, kptr_restrict, /tmp noexec</li>
+                </ul>
+            </div>
+
+            <div class="feature-card email reveal reveal-delay-3">
+                <div class="card-icon">&#x1f4e7;</div>
+                <h3>Email &amp; observabilite</h3>
+                <ul>
+                    <li><strong>Postfix</strong> Send-only loopback, OpenDKIM multi-domaines</li>
+                    <li><strong>DANE/TLSA</strong> Certificat TLS publie dans le DNS</li>
+                    <li><strong>Dashboard</strong> Temps reel HTML/CGI, URL secrete + IP</li>
+                    <li><strong>Alertes</strong> Slack, Telegram, Discord</li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- MULTI-DOMAINES -->
+<section id="domains" class="domains-section">
+    <div class="container">
+        <h2 class="reveal">Multi-domaines</h2>
+        <p class="section-desc reveal">Chaque domaine ajoute obtient <strong>automatiquement</strong> l'integralite de la stack.</p>
+
+        <div class="pipeline-wrap reveal">
+            <div class="pipeline">
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#3b82f6">&#x1f4dd;</div>
+                    <div class="pipe-label">Register</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#a855f7">&#x1f511;</div>
+                    <div class="pipe-label">DKIM</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#8b5cf6">&#x2699;&#xfe0f;</div>
+                    <div class="pipe-label">OpenDKIM</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#f59e0b">&#x1f3a8;</div>
+                    <div class="pipe-label">Parking</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#22c55e">&#x1f310;</div>
+                    <div class="pipe-label">DNS</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#ef4444">&#x1f512;</div>
+                    <div class="pipe-label">SSL</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#14b8a6">&#x1f4c1;</div>
+                    <div class="pipe-label">VHosts</div>
+                </div>
+                <div class="pipe-arrow"></div>
+                <div class="pipe-step">
+                    <div class="pipe-circle" style="background:#64748b">&#x1f4cb;</div>
+                    <div class="pipe-label">Logrotate</div>
+                </div>
+            </div>
+        </div>
+
+        <div class="pipeline-detail reveal">
+            <table>
+                <thead><tr><th>#</th><th>Fonction</th><th>Resultat</th></tr></thead>
+                <tbody>
+                    <tr><td>1</td><td><code>dm_register_domain</code></td><td>domains.conf &mdash; domaine:selecteur</td></tr>
+                    <tr><td>2</td><td><code>dm_generate_dkim_key</code></td><td>/etc/opendkim/keys/{domain}/{sel}.private</td></tr>
+                    <tr><td>3</td><td><code>dm_rebuild_opendkim</code></td><td>keytable + signingtable + trustedhosts</td></tr>
+                    <tr><td>4</td><td><code>dm_deploy_parking</code></td><td>Page WebGL Three.js 3D + robots.txt</td></tr>
+                    <tr><td>5</td><td><code>dm_setup_dns</code></td><td>API OVH : A, AAAA, www, SPF, DKIM, DMARC, CAA</td></tr>
+                    <tr><td>6</td><td><code>dm_obtain_ssl</code></td><td>Certbot DNS-01 wildcard ou HTTP-01</td></tr>
+                    <tr><td>7</td><td><code>dm_deploy_vhosts</code></td><td>000-redirect + 010-https + 020-wildcard</td></tr>
+                    <tr><td>8</td><td><code>dm_deploy_logrotate</code></td><td>/etc/logrotate.d/apache-vhost-{domain}</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="note-box reveal">
+            <strong>Tolerant aux erreurs</strong> &mdash; Si le DNS echoue (pas de credentials OVH), le VHost est quand meme deploye. Corriger ensuite : <code>--check-dns --fix</code>
+        </div>
+    </div>
+</section>
+
+<!-- ARCHITECTURE -->
+<section id="architecture">
+    <div class="container">
+        <h2 class="reveal">Defense en profondeur</h2>
+        <p class="section-desc reveal">9 couches de securite entre Internet et vos donnees.</p>
+
+        <div class="layers">
+            <div class="layer reveal" style="background:linear-gradient(135deg,#dc2626,#ef4444)">
+                <span class="layer-name">GeoIP</span>
+                <span class="layer-desc">103 pays bloques &mdash; ipset kernel</span>
+                <span class="layer-tag">reseau</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#b91c1c,#dc2626)">
+                <span class="layer-name">UFW</span>
+                <span class="layer-desc">deny-all + whitelist (SSH, 80, 443)</span>
+                <span class="layer-tag">reseau</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#9f1239,#be123c)">
+                <span class="layer-name">Fail2ban</span>
+                <span class="layer-desc">ban progressif 1h &rarr; 24h &rarr; 7 jours</span>
+                <span class="layer-tag">reseau</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#c2410c,#ea580c)">
+                <span class="layer-name">ModSecurity</span>
+                <span class="layer-desc">WAF OWASP CRS &mdash; SQLi, XSS, LFI, RCE</span>
+                <span class="layer-tag">app</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#b45309,#d97706)">
+                <span class="layer-name">Apache headers</span>
+                <span class="layer-desc">HSTS, CSP, X-Frame, Permissions-Policy</span>
+                <span class="layer-tag">app</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#a16207,#ca8a04)">
+                <span class="layer-name">PHP hardening</span>
+                <span class="layer-desc">disable_functions, opcache, expose_php=Off</span>
+                <span class="layer-tag">app</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#15803d,#16a34a)">
+                <span class="layer-name">AppArmor</span>
+                <span class="layer-desc">MAC &mdash; Apache, MariaDB, Postfix</span>
+                <span class="layer-tag">systeme</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#047857,#059669)">
+                <span class="layer-name">auditd</span>
+                <span class="layer-desc">journalisation syscalls sensibles</span>
+                <span class="layer-tag">systeme</span>
+            </div>
+            <div class="layer reveal" style="background:linear-gradient(135deg,#0f766e,#0d9488)">
+                <span class="layer-name">sysctl + /tmp noexec</span>
+                <span class="layer-desc">ASLR, syncookies, kptr_restrict</span>
+                <span class="layer-tag">systeme</span>
+            </div>
+        </div>
+
+        <div class="callout-important reveal">
+            <strong>9 couches</strong> &mdash; du filtrage GeoIP au niveau kernel jusqu'au hardening sysctl.
+        </div>
+    </div>
+</section>
+
+<!-- OPERATIONS -->
+<section id="operations" class="domains-section">
+    <div class="container">
+        <h2 class="reveal">Operations</h2>
+        <p class="section-desc reveal">Tout se fait via le meme point d'entree.</p>
+
+        <div class="terminals reveal">
+            <div class="terminal">
+                <div class="terminal-bar">
+                    <div class="terminal-dot r"></div>
+                    <div class="terminal-dot y"></div>
+                    <div class="terminal-dot g"></div>
+                    <span class="terminal-title">demarrage-rapide</span>
+                </div>
+<pre><span class="comment"># Installation complete</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh</span>
+
+<span class="comment"># Mode silencieux</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --noninteractive</span>
+
+<span class="comment"># Simulation</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --dry-run</span>
+
+<span class="comment"># Audit</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --audit</span></pre>
+            </div>
+
+            <div class="terminal">
+                <div class="terminal-bar">
+                    <div class="terminal-dot r"></div>
+                    <div class="terminal-dot y"></div>
+                    <div class="terminal-dot g"></div>
+                    <span class="terminal-title">domaines</span>
+                </div>
+<pre><span class="comment"># Ajouter un domaine</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --domain-add example.com</span>
+
+<span class="comment"># Lister / verifier</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --domain-list</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --domain-check</span>
+
+<span class="comment"># DNS auto-correction</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --check-dns --fix</span></pre>
+            </div>
+
+            <div class="terminal">
+                <div class="terminal-bar">
+                    <div class="terminal-dot r"></div>
+                    <div class="terminal-dot y"></div>
+                    <div class="terminal-dot g"></div>
+                    <span class="terminal-title">infra</span>
+                </div>
+<pre><span class="comment"># Backup</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --backup</span>
+
+<span class="comment"># Clonage serveur</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --clone 10.0.0.2</span>
+
+<span class="comment"># Fleet multi-serveurs</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --fleet-status</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --fleet-exec "apt update"</span></pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- TESTS -->
+<section id="tests" class="tests-section">
+    <div class="container">
+        <div class="tests-hero reveal">
+            <div class="tests-num">465</div>
+            <div class="tests-label">tests unitaires &mdash; 43 fichiers &mdash; bats-core</div>
+            <div class="test-bar"><div class="test-bar-fill"></div></div>
+        </div>
+
+        <div class="terminals reveal" style="max-width:500px;margin:0 auto;">
+            <div class="terminal">
+                <div class="terminal-bar">
+                    <div class="terminal-dot r"></div>
+                    <div class="terminal-dot y"></div>
+                    <div class="terminal-dot g"></div>
+                    <span class="terminal-title">make</span>
+                </div>
+<pre><span class="prompt">$</span> <span class="cmd">make test</span>           <span class="comment"># 465 tests bats-core</span>
+<span class="prompt">$</span> <span class="cmd">make lint</span>           <span class="comment"># shellcheck</span>
+<span class="prompt">$</span> <span class="cmd">make check-syntax</span>   <span class="comment"># bash -n</span>
+<span class="prompt">$</span> <span class="cmd">make docker-test</span>    <span class="comment"># Docker isole</span></pre>
+            </div>
+        </div>
+    </div>
+</section>
+
+<!-- FOOTER -->
+<footer>
+    <div class="container">
+        <p>Usage prive &mdash; Auteur : Seb</p>
+    </div>
+</footer>
+
+<script>
+const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.classList.add('visible');
+    });
+}, { threshold: 0.1 });
+document.querySelectorAll('.reveal').forEach(el => observer.observe(el));
+
+document.querySelectorAll('nav a[href^="#"]').forEach(a => {
+    a.addEventListener('click', e => {
+        e.preventDefault();
+        const t = document.querySelector(a.getAttribute('href'));
+        if (t) t.scrollIntoView({ behavior: 'smooth' });
+    });
+});
+
+const barObs = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+        if (entry.isIntersecting) entry.target.querySelector('.test-bar-fill').classList.add('animate');
+    });
+}, { threshold: 0.5 });
+document.querySelectorAll('.test-bar').forEach(el => barObs.observe(el));
+</script>
+
+</body>
+</html>
