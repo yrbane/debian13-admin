@@ -124,6 +124,18 @@ EOF
   dm_dns_upsert "example.com" "www" "A" '"1.2.3.4"'
 }
 
+@test "dm_dns_upsert: idempotent (updates if record exists)" {
+  local create_count=0 update_count=0
+  ovh_dns_find()   { echo "42"; return 0; }
+  ovh_dns_create() { ((++create_count)); return 0; }
+  ovh_dns_update() { ((++update_count)); return 0; }
+
+  source "${BATS_TEST_DIRNAME}/../lib/domain-manager.sh"
+  dm_dns_upsert "example.com" "www" "A" '"1.2.3.4"'
+  [ "$create_count" -eq 0 ]
+  [ "$update_count" -eq 1 ]
+}
+
 # --- dm_obtain_ssl: propagates certbot exit code ---
 
 @test "dm_obtain_ssl: returns 0 on certbot success" {

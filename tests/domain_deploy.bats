@@ -138,3 +138,24 @@ teardown() { teardown_test_env; }
   dm_deploy_vhosts "example.com"
   [ -f "${APACHE_SITES_DIR}/010-example.com.conf" ]
 }
+
+@test "deploy_logrotate: idempotent (second run overwrites)" {
+  dm_deploy_logrotate "example.com"
+  dm_deploy_logrotate "example.com"
+  [ -f "${LOGROTATE_DIR}/apache-vhost-example.com" ]
+  [ "$(grep -c 'daily' "${LOGROTATE_DIR}/apache-vhost-example.com")" -eq 1 ]
+}
+
+@test "remove_vhosts: idempotent (double remove does not fail)" {
+  dm_deploy_vhosts "example.com"
+  dm_remove_vhosts "example.com"
+  dm_remove_vhosts "example.com"
+  [ ! -f "${APACHE_SITES_DIR}/000-example.com-redirect.conf" ]
+}
+
+@test "remove_logrotate: idempotent (double remove does not fail)" {
+  echo "test" > "${LOGROTATE_DIR}/apache-vhost-example.com"
+  dm_remove_logrotate "example.com"
+  dm_remove_logrotate "example.com"
+  [ ! -f "${LOGROTATE_DIR}/apache-vhost-example.com" ]
+}

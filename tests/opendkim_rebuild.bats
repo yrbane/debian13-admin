@@ -69,6 +69,25 @@ teardown() { teardown_test_env; }
   [ ! -s "${OPENDKIM_DIR}/keytable" ]
 }
 
+@test "rebuild_opendkim: idempotent (second run produces same output)" {
+  dm_register_domain "alpha.com" "mail"
+  mkdir -p "${DKIM_KEYDIR}/alpha.com"
+  touch "${DKIM_KEYDIR}/alpha.com/mail.private"
+
+  dm_rebuild_opendkim --no-restart
+  local first_keytable first_signing
+  first_keytable=$(cat "${OPENDKIM_DIR}/keytable")
+  first_signing=$(cat "${OPENDKIM_DIR}/signingtable")
+
+  dm_rebuild_opendkim --no-restart
+  local second_keytable second_signing
+  second_keytable=$(cat "${OPENDKIM_DIR}/keytable")
+  second_signing=$(cat "${OPENDKIM_DIR}/signingtable")
+
+  [ "$first_keytable" = "$second_keytable" ]
+  [ "$first_signing" = "$second_signing" ]
+}
+
 @test "rebuild_opendkim: multiple domains produce correct signingtable" {
   dm_register_domain "a.com" "mail"
   dm_register_domain "b.org" "sel2"

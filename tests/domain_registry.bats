@@ -110,6 +110,16 @@ teardown() { teardown_test_env; }
   dm_domain_exists "a.com"
 }
 
+@test "unregister_domain: idempotent (double unregister)" {
+  dm_register_domain "a.com" "mail"
+  dm_register_domain "b.com" "mail"
+  dm_unregister_domain "a.com"
+  dm_unregister_domain "a.com"
+  run dm_domain_exists "a.com"
+  [ "$status" -eq 1 ]
+  dm_domain_exists "b.com"
+}
+
 # --- dm_get_selector ---
 @test "get_selector: returns correct selector" {
   dm_register_domain "test.com" "dkim2024"
