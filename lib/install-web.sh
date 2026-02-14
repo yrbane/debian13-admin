@@ -1,8 +1,29 @@
 #!/usr/bin/env bash
 # lib/install-web.sh — Apache/PHP, MariaDB, phpMyAdmin, Postfix/OpenDKIM, Certbot
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
+#
+# Stack applicative du serveur. L'ordre d'installation reflète les dépendances :
+#
+#   5)  Apache + PHP         → serveur web + interpréteur (requis par tout le reste)
+#       Pages d'erreur WebGL → intercepte toutes les erreurs HTTP (400-511)
+#   6)  MariaDB              → base de données (optionnel, requis par phpMyAdmin)
+#   6b) phpMyAdmin           → GUI MariaDB sécurisée (URL aléatoire, cookie court)
+#   7)  Postfix + OpenDKIM   → email sortant signé DKIM (loopback-only, pas de MX entrant)
+#   8)  Certbot              → TLS via Let's Encrypt (wildcard DNS-01 ou HTTP-01)
+#   8b) VirtualHosts         → VHosts Apache + parking page WebGL + logrotate
+#   9)  DNS auto-config      → SPF/DKIM/DMARC/CAA via API OVH
+#
+# Philosophie sécurité web :
+#   - Headers défensifs systématiques (HSTS, CSP, X-Frame-Options, etc.)
+#   - ServerTokens=Prod + ServerSignature=Off → ne pas révéler la version Apache
+#   - mod_security2 (WAF) + mod_evasive (anti-DDoS basique)
+#   - PHP durci : fonctions dangereuses désactivées, opcache activé, display_errors=Off
+#   - phpMyAdmin : URL aléatoire (hex), cookie 30min, pas de serveur arbitraire
 
 # ---------------------------------- 5) Apache/PHP -------------------------------------
+# Installation complète : Apache MPM event + PHP + modules de sécurité.
+# mod_security2 = WAF (Web Application Firewall) basé sur les règles OWASP CRS.
+# mod_evasive = protection basique contre les requêtes répétitives (DDoS applicatif).
 if $INSTALL_APACHE_PHP; then
   section "Apache + PHP"
   apt_install apache2 apache2-utils
@@ -10,12 +31,12 @@ if $INSTALL_APACHE_PHP; then
   apt_install php php-cli php-fpm php-mysql php-curl php-xml php-gd php-mbstring php-zip php-intl php-opcache php-imagick imagemagick libapache2-mod-php
   apt_install libapache2-mod-security2 libapache2-mod-evasive
 
-  # Activer les modules Apache utiles
-  a2enmod headers rewrite ssl security2  # Sécurité & réécriture
-  a2enmod expires deflate                 # Performance (cache, compression)
-  a2enmod proxy proxy_http proxy_wstunnel # Reverse proxy & WebSocket
-  a2enmod socache_shmcb                   # Cache SSL sessions
-  a2enmod vhost_alias                     # Virtual hosts
+  # Modules Apache — chaque groupe sert un rôle précis :
+  a2enmod headers rewrite ssl security2  # Sécurité : headers HTTP, URL rewriting, TLS, WAF
+  a2enmod expires deflate                 # Performance : cache navigateur, compression gzip
+  a2enmod proxy proxy_http proxy_wstunnel # Reverse proxy : HTTP backend + WebSocket passthrough
+  a2enmod socache_shmcb                   # SSL session cache en mémoire partagée (performance TLS)
+  a2enmod vhost_alias                     # VirtualDocumentRoot dynamique (wildcard subdomains)
   cat >/etc/apache2/conf-available/security-headers.conf <<'EOF'
 <IfModule mod_headers.c>
   Header always set X-Frame-Options "SAMEORIGIN"
@@ -27,8 +48,11 @@ if $INSTALL_APACHE_PHP; then
 </IfModule>
 EOF
   a2enconf security-headers
+  # Masquer la version d'Apache dans les réponses HTTP et les pages d'erreur.
+  # Un attaquant qui connaît la version exacte peut cibler des CVE spécifiques.
   sed -ri 's/^ServerTokens .*/ServerTokens Prod/; s/^ServerSignature .*/ServerSignature Off/' /etc/apache2/conf-available/security.conf
-  # PHP hardening
+  # Durcissement PHP : on applique les mêmes règles à tous les SAPI (apache2, cli, fpm)
+  # pour éviter les incohérences entre l'exécution web et les scripts cron.
   for INI in /etc/php/*/apache2/php.ini /etc/php/*/cli/php.ini /etc/php/*/fpm/php.ini; do
     [[ -f "$INI" ]] || continue
     backup_file "$INI"
@@ -47,6 +71,20 @@ EOF
   log "Apache/PHP installés et durcis."
 
   # ---------------------------------- Pages d'erreur WebGL --------------------------------
+  # Architecture des pages d'erreur :
+  #   /var/www/errorpages/
+  #     error.php          ← page unique qui récupère le code HTTP via $_SERVER['REDIRECT_STATUS']
+  #     error-notify.php   ← inclus par error.php si code >= 500 → envoie un email admin
+  #     trusted-ips.php    ← liste des IPs autorisées à voir le debug détaillé
+  #     css/error.css      ← styles partagés (thème sombre, animation code HTTP)
+  #
+  # Le code HTTP est affiché en 3D via Three.js (WebGL). Les IPs trusted voient en
+  # plus : URI demandée, headers de la requête, variables serveur — utile pour le debug
+  # sans exposer d'information aux visiteurs non autorisés.
+  #
+  # Le throttle email (error-notify.php) empêche le flood : un seul email par code
+  # d'erreur par tranche de ERROR_THROTTLE_SECONDS (défaut 5min), via un fichier
+  # lock dans /tmp. Cela protège la boîte mail en cas de DDoS déclenchant des 503.
   section "Pages d'erreur WebGL"
 
   mkdir -p "${ERROR_PAGES_DIR}/css"
@@ -180,6 +218,9 @@ ERRORCONF
 fi
 
 # ---------------------------------- 6) MariaDB ----------------------------------------
+# Hardening minimal mais efficace : suppression des utilisateurs anonymes, de la base
+# de test, et flush des privilèges. Équivalent au mysql_secure_installation interactif,
+# mais scriptable et idempotent (les DELETE/DROP IF EXISTS ne cassent rien si déjà fait).
 if $INSTALL_MARIADB; then
   section "MariaDB"
   apt_install mariadb-server mariadb-client
@@ -194,6 +235,12 @@ SQL
 fi
 
 # ---------------------------------- 6b) phpMyAdmin --------------------------------------
+# Stratégie de sécurisation phpMyAdmin :
+#   1. URL aléatoire : /dbadmin_<hex> au lieu de /phpmyadmin (anti-scan automatisé)
+#   2. Cookie session courte (30min) → réduit la fenêtre en cas de vol de session
+#   3. AllowArbitraryServer=false → empêche d'utiliser PMA comme proxy vers d'autres DBs
+#   4. Logs d'auth vers syslog → intégration Fail2ban possible
+#   L'alias est sauvegardé dans /root/.phpmyadmin_alias (mode 600, root-only).
 if $INSTALL_PHPMYADMIN; then
   if ! $INSTALL_MARIADB || ! $INSTALL_APACHE_PHP; then
     warn "phpMyAdmin nécessite MariaDB et Apache/PHP. Installation ignorée."
@@ -255,6 +302,22 @@ PMASEC
 fi
 
 # ---------------------------------- 7) Postfix + OpenDKIM ------------------------------
+# Configuration email sortant uniquement (pas de MX entrant — les MX OVH gèrent la réception).
+#
+# Postfix est en mode loopback-only (inet_interfaces=loopback-only) :
+#   - Seuls les processus locaux (cron, PHP mail(), logwatch) peuvent envoyer
+#   - Aucun port SMTP exposé au réseau → pas de relay ouvert possible
+#   - TLS opportuniste en sortie (smtp_tls_security_level=may)
+#
+# OpenDKIM signe les emails sortants pour prouver l'authenticité du domaine.
+# Architecture multi-domaines :
+#   /etc/opendkim/keys/{domaine}/{selecteur}.private  ← clés RSA 2048 bits
+#   /etc/opendkim/keytable     ← mapping sélecteur → fichier clé
+#   /etc/opendkim/signingtable ← mapping expéditeur → sélecteur (regex: *@domaine)
+#   /etc/opendkim/trustedhosts ← IPs autorisées à signer (localhost uniquement)
+#
+# Le milter protocol 6 (postconf milter_protocol=6) est la version la plus récente,
+# supportant les headers étendus et la gestion des erreurs améliorée.
 if $INSTALL_POSTFIX_DKIM; then
   section "Postfix (send-only) + OpenDKIM"
   echo "postfix postfix/mailname string ${DKIM_DOMAIN}" | debconf-set-selections
@@ -283,7 +346,9 @@ if $INSTALL_POSTFIX_DKIM; then
   chown -R opendkim:opendkim /etc/opendkim
   chmod -R go-rwx /etc/opendkim
 
-  # Migration : ancien layout flat -> multi-domaine (keys/{domain}/{selector}.private)
+  # Migration de layout DKIM : avant le multi-domaines, les clés étaient stockées à plat
+  # dans keys/{selector}.private. Le nouveau layout keys/{domain}/{selector}.private
+  # permet de gérer N domaines sur le même serveur sans collision de noms.
   local old_key="${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.private"
   local new_key="${dm_keydir}/${DKIM_SELECTOR}.private"
   if [[ -f "$old_key" && ! -f "$new_key" ]]; then
@@ -344,6 +409,21 @@ EOF
 fi
 
 # ---------------------------------- 8) Certbot ----------------------------------------
+# Deux modes de validation Let's Encrypt selon la configuration :
+#
+#   DNS-01 (wildcard, via API OVH) :
+#     - Crée un enregistrement TXT _acme-challenge.{domaine} pour prouver le contrôle
+#     - Permet les certificats wildcard (*.domaine.tld) → un seul cert pour tous les sous-domaines
+#     - Nécessite des credentials API OVH avec droits GET/POST/DELETE sur /domain/zone/*
+#     - Propagation DNS : on attend CERTBOT_DNS_PROPAGATION secondes (défaut 60s)
+#
+#   HTTP-01 (fallback, sans credentials OVH) :
+#     - Let's Encrypt accède à http://{domaine}/.well-known/acme-challenge/
+#     - Pas de wildcard possible → un certificat par sous-domaine
+#     - Nécessite que le port 80 soit accessible depuis Internet
+#
+# Le hook de renouvellement (renewal-hooks/deploy/) recharge Apache automatiquement
+# après chaque renouvellement, évitant un cert expiré en production.
 if $INSTALL_CERTBOT; then
   section "Certbot (Let's Encrypt)"
   apt_install certbot python3-certbot-apache
@@ -462,6 +542,21 @@ RENEWHOOK
 fi
 
 # ---------------------------------- 8b) VirtualHost + Parking ----------------------------
+# Architecture VHost multi-domaines (3 fichiers par domaine) :
+#
+#   000-{domain}-redirect.conf  → HTTP:80 → HTTPS 301 (y compris www)
+#   010-{domain}.conf           → HTTPS:443 apex + www, DocumentRoot /var/www/{domain}/www/public
+#   020-{domain}-wildcard.conf  → HTTPS:443 *.{domain} via VirtualDocumentRoot (si cert wildcard)
+#
+# La numérotation 000/010/020 garantit l'ordre de chargement par Apache :
+#   - 000 = redirection HTTP (doit matcher en premier sur :80)
+#   - 010 = VHost HTTPS principal (apex + www)
+#   - 020 = VHost wildcard (catch-all pour les sous-domaines)
+#
+# Le parking page est une page WebGL (Three.js) affichant le nom de domaine
+# en 3D avec des animations. Elle sert de placeholder visible pour confirmer
+# que le domaine est correctement configuré. robots.txt Disallow:/ empêche
+# l'indexation pendant que le site n'est pas encore déployé.
 if $INSTALL_APACHE_PHP; then
   section "VirtualHost HTTPS + Page de parking"
 
@@ -512,6 +607,16 @@ if $INSTALL_APACHE_PHP; then
 fi
 
 # ---------------------------------- 9) DNS auto-config (SPF/DKIM/DMARC) ----------------
+# Configuration automatique des enregistrements DNS nécessaires à la délivrabilité email.
+# Sans ces enregistrements, les emails sortants risquent d'atterrir en spam :
+#
+#   SPF  → "qui a le droit d'envoyer pour ce domaine" (IP du serveur + MX OVH)
+#   DKIM → "ce message a été signé par le serveur autorisé" (clé publique dans le DNS)
+#   DMARC → "que faire si SPF ou DKIM échoue" (quarantine + rapport à l'admin)
+#   CAA  → "seul Let's Encrypt peut émettre des certificats pour ce domaine"
+#
+# La fonction dm_setup_dns() gère aussi les enregistrements A, AAAA et www.
+# Tous les appels API OVH sont idempotents (upsert : update si existe, create sinon).
 if $INSTALL_POSTFIX_DKIM && [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
   section "Configuration DNS automatique (SPF/DKIM/DMARC)"
   log "Credentials OVH détectés — vérification de l'accès API..."

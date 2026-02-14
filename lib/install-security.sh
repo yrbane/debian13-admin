@@ -1,8 +1,34 @@
 #!/usr/bin/env bash
 # lib/install-security.sh — ClamAV, rkhunter, Logwatch, SSH alerts, AIDE, ModSec, /tmp, sysctl, logrotate, bashrc
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
+#
+# Sécurité applicative et monitoring post-intrusion. Contrairement à install-base.sh
+# qui sécurise le périmètre réseau (SSH, UFW, Fail2ban), ce fichier déploie les
+# couches de détection et de réponse :
+#
+#   14)  ClamAV        → antivirus (signatures + scan quotidien)
+#   14b) rkhunter      → détection rootkits (scan hebdomadaire)
+#   14c) Logwatch      → résumé quotidien des logs par email
+#   14d) SSH alert     → notification email à chaque connexion SSH (avec géolocalisation)
+#   14e) AIDE          → intégrité filesystem (détecte les modifications de binaires)
+#   14f) ModSecurity   → WAF Apache avec OWASP Core Rule Set
+#   14g) AppArmor      → confinement des processus (MAC)
+#   14g2) auditd       → journalisation des accès sensibles (syscalls, fichiers)
+#   14h) /tmp sécurisé → noexec,nosuid,nodev (empêche l'exécution depuis /tmp)
+#   15)  sysctl        → durcissement kernel (ASLR, syncookies, redirects, etc.)
+#   15b) logrotate     → rotation des logs pour éviter le remplissage disque
+#   16)  bashrc        → confort shell (couleurs, alias, fortune|cowsay|lolcat)
+#
+# Chaque composant est optionnel (contrôlé par une variable $INSTALL_*).
+# Tous les scripts cron sont déployés via deploy_script() qui gère la création
+# du fichier, le chmod +x, l'ajout au crontab et la substitution de placeholders.
 
 # ---------------------------------- 14) ClamAV ----------------------------------------
+# ClamAV : antivirus libre avec mises à jour de signatures via freshclam.
+# Le service freshclam tourne en daemon pour télécharger les signatures en continu.
+# Le scan quotidien (cron 2h00) parcourt tout le filesystem et envoie un rapport
+# email si des fichiers suspects sont détectés. Les rapports au-delà de
+# CLAMAV_LOG_RETENTION_DAYS sont purgés automatiquement.
 if $INSTALL_CLAMAV; then
   section "ClamAV"
   apt_install clamav clamav-daemon mailutils cron
@@ -25,6 +51,14 @@ if $INSTALL_CLAMAV; then
 fi
 
 # ---------------------------------- 14b) rkhunter -------------------------------------
+# rkhunter compare les binaires système contre une base de référence (--propupd).
+# Il détecte : rootkits connus, fichiers cachés suspects, modifications de binaires,
+# ports en écoute inhabituels, comptes sans mot de passe.
+#
+# Les whitelist SCRIPTWHITELIST/ALLOWHIDDEN évitent les faux positifs classiques
+# sur Debian (egrep/fgrep sont des wrappers shell, .java/.gitignore sont légitimes).
+# UPDATE_MIRRORS=0 + WEB_CMD="" = pas de mise à jour réseau automatique des signatures
+# (on utilise APT_AUTOGEN=true pour que les mises à jour apt régénèrent la base).
 if $INSTALL_RKHUNTER; then
   section "rkhunter (détection rootkits)"
   apt_install rkhunter
@@ -65,6 +99,9 @@ RKHCONF
 fi
 
 # ---------------------------------- 14c) Logwatch -------------------------------------
+# Logwatch parse les logs système (auth, apache, postfix, etc.) et génère un rapport
+# HTML quotidien envoyé par email. Detail=Med est un bon compromis entre verbosité
+# et lisibilité. Range=yesterday couvre les dernières 24h (exécution via cron.daily).
 if $INSTALL_LOGWATCH; then
   section "Logwatch (résumé quotidien des logs)"
   apt_install logwatch
@@ -84,6 +121,11 @@ LOGWATCHCONF
 fi
 
 # ---------------------------------- 14d) SSH Login Alert ------------------------------
+# Script dans /etc/profile.d/ : exécuté à chaque login interactif (bash/zsh).
+# On vérifie SSH_CONNECTION (ne s'exécute pas pour les sessions locales) et
+# $PS1 (ne s'exécute pas pour les sessions non-interactives comme scp/rsync).
+# La géolocalisation via ipinfo.io est best-effort (timeout 3s, pas bloquant).
+# L'email est envoyé en background (&) pour ne pas ralentir le login.
 if $INSTALL_SSH_ALERT; then
   section "Alerte email connexion SSH"
 
@@ -138,6 +180,14 @@ SSHALERT
 fi
 
 # ---------------------------------- 14e) AIDE ------------------------------------------
+# AIDE (Advanced Intrusion Detection Environment) : IDS basé sur l'intégrité des fichiers.
+# Principe : on crée une base de référence (aideinit) contenant les hash de tous les
+# fichiers système. Le check quotidien compare l'état actuel à cette base et signale
+# toute modification (binaire modifié = potentielle compromission).
+#
+# Les exclusions (/var/log, /var/cache, etc.) sont critiques pour éviter les faux
+# positifs massifs — ces répertoires changent légitimement en permanence.
+# L'initialisation est lancée en background (&) car elle peut prendre 5-10 minutes.
 if $INSTALL_AIDE; then
   section "AIDE (détection modifications fichiers)"
   apt_install aide
@@ -179,6 +229,21 @@ AIDECONF
 fi
 
 # ---------------------------------- 14f) ModSecurity OWASP CRS ------------------------
+# ModSecurity = WAF (Web Application Firewall) qui inspecte chaque requête HTTP.
+# OWASP CRS (Core Rule Set) = ensemble de règles communautaires couvrant :
+#   - Injection SQL, XSS, LFI/RFI, command injection
+#   - Scanner fingerprinting, protocol anomalies
+#   - Session fixation, file upload abuse
+#
+# Deux modes : DetectionOnly (log sans bloquer, pour tester) ou On (blocage actif).
+# MODSEC_ENFORCE=true dans le .conf active le mode blocage.
+#
+# Les TRUSTED_IPS sont whitelistées (bypass complet des règles) pour éviter
+# les faux positifs pendant le développement. En production, ces IPs devraient
+# être limitées aux postes d'administration.
+#
+# block_hack.sh (cron horaire) parse le log d'audit ModSecurity et ajoute les IPs
+# récurrentes dans les règles UFW (ban permanent au niveau réseau).
 if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
   section "ModSecurity OWASP Core Rule Set"
 
@@ -244,6 +309,9 @@ MODSECCONF
 fi
 
 # ---------------------------------- 14g) AppArmor ------------------------------------
+# AppArmor = Mandatory Access Control (MAC) qui confine les processus dans des profils.
+# Même si Apache est compromis, AppArmor limite ce que le processus peut lire/écrire/exécuter.
+# deploy_apparmor_profiles() crée des profils pour Apache, MariaDB et Postfix.
 if $INSTALL_APPARMOR; then
   section "AppArmor"
   apt_install apparmor apparmor-utils
@@ -261,6 +329,10 @@ if $INSTALL_APPARMOR; then
 fi
 
 # ---------------------------------- 14g2) auditd ------------------------------------
+# auditd journalise les appels système sensibles (accès aux fichiers critiques,
+# modifications de permissions, exécutions de binaires suspects). Utile pour
+# l'analyse post-incident : "qui a fait quoi, quand, depuis quel processus".
+# Les règles de hardening surveillent /etc/passwd, /etc/shadow, les clés SSH, etc.
 if $INSTALL_AUDITD; then
   section "auditd (audit de sécurité)"
   apt_install auditd audispd-plugins
@@ -276,6 +348,12 @@ if $INSTALL_AUDITD; then
 fi
 
 # ---------------------------------- 14h) Secure /tmp ----------------------------------
+# /tmp en noexec,nosuid,nodev empêche un attaquant de :
+#   - Déposer et exécuter un binaire dans /tmp (noexec)
+#   - Exploiter un binaire SUID déposé dans /tmp (nosuid)
+#   - Créer des device nodes dans /tmp (nodev)
+# C'est un vecteur d'attaque classique : l'attaquant télécharge un payload dans
+# /tmp (world-writable), puis l'exécute. Avec noexec, l'exécution est bloquée par le kernel.
 if $SECURE_TMP; then
   section "Sécurisation /tmp (noexec, nosuid, nodev)"
 
@@ -318,6 +396,10 @@ if $SECURE_TMP; then
 fi
 
 # ---------------------------------- 14h) Durcissement sudo ----------------------------
+# timestamp_timeout=5 : le cache sudo expire après 5 min (défaut Debian : 15 min).
+# logfile : toutes les commandes sudo sont journalisées (utile pour l'audit).
+# secure_path : empêche l'injection de binaires via un PATH utilisateur modifié.
+# Le fichier est vérifié par visudo -c avant activation (si invalide → suppression).
 section "Durcissement sudo"
 cat > /etc/sudoers.d/99-hardening <<EOF
 # Timeout de session sudo (5 minutes)
@@ -336,6 +418,20 @@ else
 fi
 
 # ---------------------------------- 15) Sysctl/journald/updates -----------------------
+# Durcissement kernel via sysctl — chaque paramètre a un rôle précis :
+#
+#   rp_filter=1          → Reverse Path Filtering : droppe les paquets avec IP source
+#                           qui ne correspond pas à la route de retour (anti-spoofing)
+#   icmp_echo_ignore_broadcasts=1 → bloque les Smurf attacks (ICMP broadcast flood)
+#   accept_source_route=0 → refuse le routage source (empêche le détournement de route)
+#   accept_redirects=0   → ignore les redirects ICMP (empêche le MitM par redirect)
+#   send_redirects=0     → ne pas envoyer de redirects (pas un routeur)
+#   accept_ra=0          → ignore les Router Advertisements IPv6 (pas auto-configuré)
+#   tcp_syncookies=1     → protection SYN flood (génère des cookies au lieu d'allouer de la RAM)
+#   kptr_restrict=2      → masque les pointeurs kernel dans /proc (anti-exploitation)
+#   dmesg_restrict=1     → restreint l'accès au log kernel (informations sensibles)
+#   protected_hardlinks/symlinks=1 → protège contre les race conditions sur les liens
+#   suid_dumpable=0      → pas de core dump pour les binaires SUID (leak de données sensibles)
 section "Durcissements kernel et journald + MAJ auto sécurité"
 cat >/etc/sysctl.d/99-hardening.conf <<'EOF'
 # Réseau & durcissements
@@ -361,7 +457,8 @@ fs.suid_dumpable=0
 EOF
 sysctl --system | tee -a "$LOG_FILE"
 
-# Désactiver le module USB storage (serveur headless)
+# Désactiver le module USB storage — un serveur dédié n'a aucune raison d'accepter
+# des périphériques USB. Empêche l'exfiltration de données via clé USB (compliance).
 cat > /etc/modprobe.d/disable-usb-storage.conf <<'EOF'
 install usb-storage /bin/true
 EOF
@@ -372,7 +469,9 @@ log "Module usb-storage désactivé"
 add_line_if_missing '^\* .*hard .*core .*0$' '* hard core 0' /etc/security/limits.conf
 log "Core dumps désactivés dans limits.conf"
 
-# Umask 027
+# Umask 027 : les fichiers créés ne sont pas lisibles par "others" (rwxr-x---)
+# Essentiel pour éviter que les fichiers de config, logs, ou données soient
+# lisibles par tous les utilisateurs du système.
 if [[ -f /etc/login.defs ]]; then
   if grep -q "^UMASK" /etc/login.defs; then
     sed -i '/^UMASK/c\UMASK\t\t027' /etc/login.defs
@@ -449,6 +548,10 @@ else
 fi
 
 # ---------------------------------- 16) .bashrc global -------------------------------
+# Déploiement d'un .bashrc commun à tous les utilisateurs (existants et futurs via /etc/skel).
+# Inclut : couleurs PS1, alias utiles (ll, gs, ...), fortune|cowsay|lolcat au login,
+# fonctions utilitaires (mkcd, extract, etc.). On vide /etc/motd et on désactive
+# update-motd.d pour que le .bashrc gère l'affichage au login (plus flexible).
 if $INSTALL_BASHRC_GLOBAL; then
   section "Déploiement .bashrc (tous utilisateurs)"
 

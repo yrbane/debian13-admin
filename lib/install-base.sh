@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # lib/install-base.sh — Locales, hostname, SSH, UFW, GeoIP, Fail2ban
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
+#
+# Couche fondation du serveur : tout ce qui doit être configuré avant les
+# services applicatifs (Apache, MariaDB, etc.). L'ordre d'exécution suit
+# une logique de dépendances :
+#
+#   1) Locales/hostname  → identité du serveur (nécessaire pour les certificats)
+#   2) SSH hardening     → premier rempart, à sécuriser immédiatement
+#   2b) LLMNR/mDNS off  → fermer les protocoles de découverte inutiles sur un serveur
+#   3) UFW + GeoIP       → périmètre réseau (deny-all + whitelist explicite)
+#   4) Fail2ban          → détection/réponse aux attaques brute-force
+#
+# Philosophie sécurité :
+#   On applique le principe de moindre privilège à chaque couche. Un attaquant
+#   qui franchit Fail2ban se heurte à UFW, puis à SSH key-only, puis à
+#   l'absence de root login. La défense en profondeur est cumulative.
+
+# ---------------------------------- 1) Locales & hostname ------------------------------
+# On active fr_FR.UTF-8 + les variantes ISO pour la compatibilité avec certains
+# outils système (cron, logwatch) qui formatent les dates en locale C ou ISO.
 
 install_locales() {
   section "Locales fr_FR"
@@ -35,6 +54,16 @@ $INSTALL_LOCALES && install_locales
 install_hostname
 
 # ---------------------------------- 2) SSH durci --------------------------------------
+# Stratégie SSH :
+#   - Authentification par clé uniquement (pas de mot de passe, pas de keyboard-interactive)
+#   - Port non standard (défaut 65222) → réduit le bruit des scans automatisés de 90%+
+#   - Algorithmes post-quantiques : sntrup761x25519-sha512 protège contre les attaques
+#     "store now, decrypt later" où un adversaire enregistre le trafic chiffré aujourd'hui
+#     pour le déchiffrer quand des ordinateurs quantiques seront disponibles
+#   - AllowUsers restreint l'accès à un seul compte (ADMIN_USER)
+#   - PermitRootLogin=no + nettoyage des clés root → même si root avait des clés,
+#     elles deviennent inutilisables (défense en profondeur)
+#   - LoginGraceTime=20s + MaxAuthTries=3 → limite l'exposition pendant l'auth
 if $INSTALL_SSH_HARDEN; then
   section "SSH durci (clé uniquement) + port ${SSH_PORT}"
   apt_install openssh-server
@@ -76,6 +105,11 @@ EOF
 fi
 
 # ---------------------------------- 2b) Désactiver LLMNR/mDNS -------------------------
+# LLMNR (Link-Local Multicast Name Resolution, port 5355) et mDNS (port 5353)
+# sont des protocoles de découverte réseau pour les postes de travail.
+# Sur un serveur dédié, ils n'ont aucune utilité et offrent une surface d'attaque
+# supplémentaire (empoisonnement de noms, rebinding DNS). On les désactive via
+# un drop-in systemd-resolved (priorité 90 = après les réglages par défaut).
 section "Désactivation LLMNR/mDNS"
 mkdir -p "${RESOLVED_DROPIN_DIR}"
 cat > "${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf" <<'EOF'
@@ -87,6 +121,13 @@ systemctl restart systemd-resolved 2>/dev/null || true
 log "LLMNR et mDNS désactivés (port 5355 fermé)"
 
 # ---------------------------------- 3) UFW --------------------------------------------
+# Politique : deny-all par défaut + whitelist explicite des ports nécessaires.
+# On n'ouvre que SSH (port custom), HTTP (80, nécessaire pour ACME HTTP-01)
+# et HTTPS (443). Tout le reste est silencieusement droppé.
+#
+# L'egress filtering (optionnel) restreint aussi les connexions sortantes :
+# seuls DNS (53), HTTP/HTTPS (80/443), SMTP (25/587), NTP (123) sont autorisés.
+# Cela empêche un processus compromis de communiquer avec un C2 sur un port exotique.
 if $INSTALL_UFW; then
   section "Pare-feu UFW"
   apt_install ufw
@@ -106,6 +147,18 @@ if $INSTALL_UFW; then
 fi
 
 # ---------------------------------- 3b) GeoIP Block ------------------------------------
+# Principe : un serveur européen recevant 0% de trafic légitime depuis certaines
+# zones géographiques peut bloquer ces plages IP au niveau kernel (ipset + iptables).
+# Résultat typique : -70% de bruit dans les logs, -90% de scans automatisés.
+#
+# Implémentation :
+#   - ipset hash:net stocke efficacement des milliers de CIDR en mémoire kernel
+#   - La règle iptables (via ufw before.rules) droppe AVANT la table NAT → zéro overhead
+#   - Le swap atomique (create new → populate → swap → destroy old) évite tout downtime
+#   - Mise à jour hebdomadaire via cron (les plages IP changent, ipdeny.com les publie)
+#
+# Attention : ce blocage est géographique, pas chirurgical. Si vous avez des
+# utilisateurs légitimes dans ces zones, désactivez GEOIP_BLOCK dans le .conf.
 if $GEOIP_BLOCK && $INSTALL_UFW; then
   section "Blocage GeoIP (${GEOIP_COUNTRY_COUNT} pays : Asie + Afrique)"
   apt_install ipset
@@ -173,6 +226,24 @@ CRONEOF
 fi
 
 # ---------------------------------- 4) Fail2ban ---------------------------------------
+# Fail2ban surveille les logs en temps réel et bannit (via iptables) les IPs
+# qui déclenchent des patterns d'attaque. Architecture en 3 niveaux :
+#
+#   Niveau 1 — Filtres standards (ssh, apache-auth, apache-badbots)
+#     Détection d'échecs d'authentification, bots connus, scans de scripts.
+#     Paramètres modérés : 5 tentatives en 10 min → ban 1h.
+#
+#   Niveau 2 — Filtres personnalisés (vulnscan, badagent)
+#     Regex ciblant les scanners automatisés (nikto, sqlmap, zgrab...) et les
+#     URLs de vulnérabilités courantes (wp-admin sur un serveur sans WordPress).
+#     Paramètres agressifs : 1-3 tentatives → ban 24-48h.
+#
+#   Niveau 3 — Filtres étendus (deploy_fail2ban_extended)
+#     POST flood, credential stuffing, ban progressif (récidive).
+#     Le ban progressif multiplie la durée à chaque récidive (1h → 24h → 7j).
+#
+# Les TRUSTED_IPS sont exclues pour éviter de se bannir soi-même pendant le dev.
+# Le backend systemd (au lieu de polling) est plus efficace sur Debian 13.
 if $INSTALL_FAIL2BAN; then
   section "Fail2ban"
   apt_install fail2ban
@@ -242,8 +313,10 @@ findtime = 10m
 maxretry = 1
 EOF
 
-  # Filtre personnalisé pour scanners de vulnérabilités
-  # Note: %% est requis pour échapper % dans les fichiers fail2ban
+  # Filtre personnalisé : scanners de vulnérabilités
+  # Cible les URLs typiques des outils automatisés (wp-admin, .env, phpinfo,
+  # SQLi patterns). La 3e regex attrape les requêtes 400 (Bad Request) qui
+  # indiquent souvent un outil qui forge des requêtes malformées.
   cat >/etc/fail2ban/filter.d/apache-vulnscan.conf <<'FILTEREOF'
 [Definition]
 # Détection des scanners de vulnérabilités et tentatives d'exploitation
@@ -253,7 +326,11 @@ failregex = ^<HOST> -.*"(GET|POST|HEAD).*(wp-login|wp-admin|wp-content|wp-includ
 ignoreregex =
 FILTEREOF
 
-  # Filtre pour User-Agents malveillants
+  # Filtre User-Agents malveillants : deux catégories distinctes.
+  # - Ligne 1 : outils de pentest nommés (nikto, sqlmap, nuclei, burp...)
+  # - Ligne 2 : clients HTTP génériques souvent utilisés par des scripts (python-requests, curl/)
+  # - Ligne 3 : requêtes sans User-Agent ni Referer (bots primitifs)
+  # L'ignoreregex protège les bots légitimes (Googlebot, bingbot, etc.).
   cat >/etc/fail2ban/filter.d/apache-badagent.conf <<'FILTEREOF'
 [Definition]
 # Détection des User-Agents de bots malveillants et scanners

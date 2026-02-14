@@ -73,7 +73,10 @@ readonly SSH_CIPHERS="chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes25
 readonly SSH_MACS="hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com"
 readonly SSH_KEX="sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org"
 
-# PHP — fonctions dangereuses à désactiver
+# PHP — fonctions dangereuses à désactiver dans php.ini (disable_functions).
+# Ces fonctions permettent l'exécution de commandes système depuis PHP.
+# Si un attaquant injecte du code PHP (upload, LFI), il ne pourra pas
+# exécuter de commandes shell. À ajuster si votre application en a besoin.
 readonly PHP_DISABLED_FUNCTIONS="exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source"
 
 # Patterns de détection (sécurité web) — regex POSIX étendue.
@@ -82,7 +85,8 @@ readonly PHP_DISABLED_FUNCTIONS="exec,passthru,shell_exec,system,proc_open,popen
 readonly SUSPICIOUS_URL_PATTERNS='(wp-login|wp-admin|wp-content|wp-includes|xmlrpc\.php|\.env|\.git|phpinfo|phpmyadmin|pma|adminer|\.sql|\.bak|\.zip|\.tar|\.rar|shell|eval\(|base64|union.*select|concat\(|etc/passwd|\.\.\/|%2e%2e|<script|\.asp|\.aspx|cgi-bin|\.cgi)'
 readonly BAD_BOT_AGENTS='(nikto|sqlmap|nmap|masscan|zgrab|census|shodan|curl/|wget/|python-requests|go-http|libwww|scanner|exploit|vulnerability|attack)'
 
-# Chemins système
+# Chemins système — centralisés ici pour faciliter les overrides en test
+# et pour l'audit (un seul endroit à vérifier si un chemin change).
 readonly SSHD_CONFIG="/etc/ssh/sshd_config"
 readonly APACHE_ACCESS_LOG="/var/log/apache2/access.log"
 readonly APACHE_ERROR_LOG="/var/log/apache2/error.log"
@@ -98,8 +102,8 @@ readonly CERTBOT_DNS_PROPAGATION=60
 readonly ERROR_PAGES_DIR="/var/www/errorpages"
 readonly SCRIPTS_DIR="/root/scripts"
 readonly WEB_USER="www-data"
-readonly ERROR_THROTTLE_SECONDS=300
-readonly THREE_JS_VERSION="r175"
+readonly ERROR_THROTTLE_SECONDS=300       # Throttle entre deux emails d'alerte pour le même code HTTP
+readonly THREE_JS_VERSION="r175"          # Version de Three.js pour les pages WebGL (parking + erreurs)
 
 # Multi-domaines — constantes pour lib/domain-manager.sh.
 # DOMAINS_CONF est le registre central (format texte : "domaine:sélecteur").

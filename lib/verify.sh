@@ -1,23 +1,42 @@
 #!/usr/bin/env bash
 # lib/verify.sh — Moteur de vérification unifié + 14 fonctions verify_*()
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
+#
+# Architecture du moteur de vérification :
+#
+#   emit_check(status, msg)   → point d'entrée unique pour toutes les vérifications
+#   emit_section(title)       → découpage logique en sections
+#   emit_section_close()      → fermeture de section (nécessaire en mode HTML)
+#
+#   CHECK_MODE détermine la sortie :
+#     "cli"  → affichage terminal coloré (✔ vert, ⚠ jaune, ✖ rouge)
+#     "html" → génération de rapport HTML (via add_html_check/add_html_section)
+#
+#   Compteurs globaux CHECKS_OK/WARN/FAIL → résumé final (ex: "42 OK, 3 WARN, 1 FAIL")
+#
+# Convention : chaque verify_*() est autonome et utilise emit_check() exclusivement.
+# Cela permet de passer d'une sortie CLI à HTML sans modifier les fonctions de vérification.
+# Le pattern est similaire à un framework de test (assertion → reporter).
+#
+# Les fonctions vérifient l'état réel du système (services actifs, fichiers présents,
+# DNS résolus, certificats valides) et NON la configuration demandée. Cela détecte
+# les dérives (drift) entre l'état souhaité et l'état effectif.
 
 # ================================== VÉRIFICATIONS =====================================
-# (#11 Phase 4) Moteur de vérification unifié — emit_check() dispatche CLI ou HTML
-# CHECK_MODE : "cli" (sortie terminal) ou "html" (sortie fichier HTML)
 CHECK_MODE="cli"
 
-# Compteurs
+# Compteurs globaux — incrémentés par check_ok/warn/fail, consultés en fin d'audit
 CHECKS_OK=0
 CHECKS_WARN=0
 CHECKS_FAIL=0
 
+# Primitives d'affichage CLI (couleurs via lib/core.sh)
 check_ok()   { printf "${GREEN}  ✔ %s${RESET}\n" "$1"; ((++CHECKS_OK)) || true; }
 check_warn() { printf "${YELLOW}  ⚠ %s${RESET}\n" "$1"; ((++CHECKS_WARN)) || true; }
 check_fail() { printf "${RED}  ✖ %s${RESET}\n" "$1"; ((++CHECKS_FAIL)) || true; }
 check_skip() { printf "${CYAN}  ○ %s (ignoré)${RESET}\n" "$1"; }
 
-# Dispatche vers CLI ou HTML selon CHECK_MODE
+# Dispatcher : redirige vers CLI ou HTML selon CHECK_MODE
 emit_check() {
   local status="$1" msg="$2"
   if [[ "$CHECK_MODE" == "html" ]]; then
@@ -47,6 +66,28 @@ emit_section_close() {
 }
 
 # ---- Fonctions de vérification (partagées CLI/HTML via emit_check) ----
+#
+# Chaque verify_*() vérifie un domaine fonctionnel :
+#
+#   verify_services()       → services systemd (SSH, UFW, Fail2ban, Apache, MariaDB, Postfix...)
+#   verify_ssh()            → config sshd (port, auth, algorithmes, PermitRootLogin)
+#   verify_web()            → Apache + PHP (modules, headers, VHosts, erreurs WebGL, ModSec)
+#   verify_system()         → sysctl, /tmp noexec, crons, AIDE, ClamAV, rkhunter, logwatch
+#   verify_devtools()       → outils dev (git, node, rust, composer, python)
+#   verify_dkim()           → OpenDKIM (clés, keytable, signingtable, test DNS)
+#   verify_sysconfig()      → hostname, locales, timezone, journald
+#   verify_users()          → utilisateurs (admin, root ssh, shells, comptes sans mdp)
+#   verify_files()          → permissions fichiers critiques (sshd_config, shadow, sudoers)
+#   verify_database()       → MariaDB (running, utilisateurs anonymes, base test, phpMyAdmin)
+#   verify_resources()      → disque, mémoire, load, taille des logs, uptime
+#   verify_ports()          → ports ouverts vs attendus
+#   verify_listening()      → services en écoute (détection de services inattendus)
+#   verify_dns()            → DNS complet (A, AAAA, MX, SPF, DKIM, DMARC, CAA, PTR, TLSA)
+#   verify_apparmor()       → profils AppArmor actifs
+#   verify_auditd()         → règles d'audit actives
+#   verify_egress()         → filtrage réseau sortant
+#   verify_suid_binaries()  → binaires SUID/SGID (détection d'anomalies)
+#   verify_tls_version()    → version TLS effective des services exposés
 
 verify_services() {
   emit_section "Services"
@@ -143,6 +184,9 @@ verify_services() {
   emit_section_close
 }
 
+# verify_ssh — Vérifie que sshd_config correspond aux réglages de hardening.
+# On lit directement le fichier de config (grep) plutôt que d'interroger sshd
+# car sshd peut avoir des valeurs par défaut qui ne sont pas dans le fichier.
 verify_ssh() {
   emit_section "Sécurité SSH"
   if $INSTALL_SSH_HARDEN; then
@@ -1023,6 +1067,10 @@ verify_listening() {
   emit_section_close
 }
 
+# verify_dns — Vérification DNS complète par requêtes dig réelles.
+# On interroge un résolveur externe (DNS_RESOLVER, défaut 8.8.8.8) pour vérifier
+# ce que le monde extérieur voit, pas le cache local. Cela détecte les problèmes
+# de propagation et les enregistrements manquants ou incorrects.
 verify_dns() {
   emit_section "Vérification DNS"
 

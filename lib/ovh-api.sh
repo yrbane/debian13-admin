@@ -1,9 +1,30 @@
 #!/usr/bin/env bash
-# lib/ovh-api.sh — Helper pour l'API OVH (requêtes signées)
+# lib/ovh-api.sh — Helper pour l'API OVH (requêtes signées HMAC-SHA1)
 # Usage: source ovh-api.sh ; ovh_api GET /domain/zone/ ; ovh_api POST /path '{"body":"json"}'
 # Dépend de: OVH_DNS_CREDENTIALS (fichier .ini avec les credentials)
+#
+# Protocole d'authentification OVH :
+#   Chaque requête API est signée via HMAC-SHA1 avec un timestamp serveur.
+#   La signature est calculée sur : app_secret + consumer_key + method + url + body + timestamp
+#   Cela empêche le replay (timestamp) et garantit l'intégrité (signature sur tout le contenu).
+#
+#   Le fichier .ini contient 3 clés :
+#     - application_key    : identifie l'application (public)
+#     - application_secret : secret partagé pour la signature
+#     - consumer_key       : token d'autorisation de l'utilisateur
+#
+#   Création des clés : https://eu.api.ovh.com/createToken/
+#   Droits nécessaires : GET/POST/DELETE /domain/zone/*, GET/POST/DELETE /ip/*
+#
+# Organisation des fonctions :
+#   Couche basse  : _ovh_load_creds(), ovh_api() — HTTP signé générique
+#   Couche DNS    : ovh_dns_find/get/create/update/delete/refresh — CRUD DNS
+#   Couche email  : ovh_setup_spf/dkim/dmarc — configuration email complète
+#   Couche réseau : ovh_ip_reverse_get/set — PTR (reverse DNS)
+#   Couche test   : ovh_test_credentials(), ovh_test_mail()
 
-# Charger les credentials OVH depuis le fichier .ini
+# _ovh_load_creds — Charge les credentials depuis le fichier .ini.
+# Les variables _OVH_AK/_OVH_AS/_OVH_CK sont globales (lazy loading via ovh_api).
 _ovh_load_creds() {
   local creds="${OVH_DNS_CREDENTIALS:-/root/.ovh-dns.ini}"
   [[ -f "$creds" ]] || { err "OVH: ${creds} introuvable"; return 1; }
@@ -13,11 +34,15 @@ _ovh_load_creds() {
   _OVH_EP="https://eu.api.ovh.com/1.0"
 }
 
-# Appel API OVH signé
+# ovh_api — Appel API OVH signé (point d'entrée HTTP générique).
 # $1 = METHOD (GET|POST|PUT|DELETE)
 # $2 = path (e.g. /domain/zone/)
 # $3 = body (optionnel, JSON)
-# Retourne 0 si succès, 1 si erreur API
+# Retourne 0 si succès (réponse JSON sur stdout), 1 si erreur API.
+#
+# Le timestamp est récupéré depuis le serveur OVH (/auth/time) pour éviter
+# les problèmes de désynchronisation d'horloge (NTP drift). La signature
+# est préfixée par "$1$" (convention OVH pour indiquer SHA1).
 ovh_api() {
   local method="$1" path="$2" body="${3:-}"
   [[ -z "${_OVH_AK:-}" ]] && _ovh_load_creds
@@ -240,7 +265,7 @@ ovh_test_mail() {
   local test_id
   test_id=$(date +%s)
 
-  log "Envoi d'un email de test a ${recipient}..."
+  log "Envoi d'un email de test à ${recipient}..."
   echo "Deliverability test from ${hostname} - ID: ${test_id}
 Date: $(date)
 Server: ${hostname}

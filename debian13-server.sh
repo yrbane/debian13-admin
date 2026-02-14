@@ -42,9 +42,16 @@
 #
 # =======================================================================================
 
+# set -Eeuo pipefail :
+#   -E  → les traps ERR sont hérités par les fonctions et sous-shells
+#   -e  → le script s'arrête immédiatement en cas d'erreur (sauf dans les conditions)
+#   -u  → les variables non définies provoquent une erreur (détecte les typos)
+#   -o pipefail → un échec dans un pipe remonte (pas seulement la dernière commande)
 set -Eeuo pipefail
 
 # ---------------------------------- Répertoire & version ------------------------------
+# SCRIPT_DIR est résolu dynamiquement pour supporter l'exécution depuis n'importe où.
+# Le fallback /root/scripts couvre le cas où le script est sourcé interactivement.
 SCRIPT_NAME="debian13-server"
 SCRIPT_VERSION="1.2.3"
 if [[ -n "${BASH_SOURCE[0]:-}" && "${BASH_SOURCE[0]}" != "bash" ]]; then
@@ -56,28 +63,35 @@ LIB_DIR="${SCRIPT_DIR}/lib"
 CONFIG_FILE="${SCRIPT_DIR}/${SCRIPT_NAME}.conf"
 
 # ---------------------------------- Chargement des bibliothèques ----------------------
+# L'ordre de source est important — chaque lib peut dépendre des précédentes :
+#
+#   Couche 0 (fondations) :  core.sh → constants.sh → helpers.sh → config.sh
+#   Couche 1 (services)   :  ovh-api.sh → domain-manager.sh
+#   Couche 2 (opérations) :  backup.sh, hooks.sh, clone.sh, tui.sh, fleet.sh
+#
+# Les directives shellcheck source= permettent l'analyse statique croisée entre fichiers.
 # shellcheck source=lib/core.sh
-source "${LIB_DIR}/core.sh"
+source "${LIB_DIR}/core.sh"            # Logging (log/warn/err/section/die) + couleurs
 # shellcheck source=lib/constants.sh
-source "${LIB_DIR}/constants.sh"
+source "${LIB_DIR}/constants.sh"       # Constantes readonly (seuils, chemins, patterns)
 # shellcheck source=lib/helpers.sh
-source "${LIB_DIR}/helpers.sh"
+source "${LIB_DIR}/helpers.sh"         # Utilitaires (apt, cron, backup, monitoring, etc.)
 # shellcheck source=lib/config.sh
-source "${LIB_DIR}/config.sh"
+source "${LIB_DIR}/config.sh"          # Gestion du fichier .conf (load/save/prompts)
 # shellcheck source=lib/ovh-api.sh
-source "${LIB_DIR}/ovh-api.sh"
+source "${LIB_DIR}/ovh-api.sh"         # API OVH (requêtes signées HMAC, DNS CRUD)
 # shellcheck source=lib/domain-manager.sh
-source "${LIB_DIR}/domain-manager.sh"
+source "${LIB_DIR}/domain-manager.sh"  # Multi-domaines (47 fonctions dm_*)
 # shellcheck source=lib/backup.sh
-source "${LIB_DIR}/backup.sh"
+source "${LIB_DIR}/backup.sh"          # Backup automatisé (configs, DKIM, MariaDB)
 # shellcheck source=lib/hooks.sh
-source "${LIB_DIR}/hooks.sh"
+source "${LIB_DIR}/hooks.sh"           # Système de plugins (hooks.d/*.sh)
 # shellcheck source=lib/clone.sh
-source "${LIB_DIR}/clone.sh"
+source "${LIB_DIR}/clone.sh"           # Clonage serveur (SSH + rsync)
 # shellcheck source=lib/tui.sh
-source "${LIB_DIR}/tui.sh"
+source "${LIB_DIR}/tui.sh"             # TUI whiptail/dialog + fallback texte
 # shellcheck source=lib/fleet.sh
-source "${LIB_DIR}/fleet.sh"
+source "${LIB_DIR}/fleet.sh"           # Orchestration multi-serveurs
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -193,6 +207,27 @@ show_help() {
 }
 
 # ---------------------------------- Arguments -----------------------------------------
+# Le script supporte ~30 flags mutuellement exclusifs, organisés en 5 catégories :
+#
+#   Modes principaux (un seul à la fois) :
+#     --noninteractive, --audit, --check-dns [--fix], --renew-ovh, --dry-run
+#
+#   Gestion domaines (action unique) :
+#     --domain-add, --domain-remove, --domain-list, --domain-check,
+#     --domain-staging, --domain-promote, --domain-group, --group-list,
+#     --domain-export, --domain-import, --dkim-rotate
+#
+#   Opérations système (action unique) :
+#     --backup, --backup-list, --rollback, --snapshot-list, --dashboard
+#
+#   Clonage & fleet (action unique) :
+#     --clone, --clone-keygen, --fleet-add, --fleet-remove, --fleet-list,
+#     --fleet-status, --fleet-exec, --fleet-sync
+#
+#   Audit :
+#     --audit-html <fichier>
+#
+# Si aucun flag n'est passé → mode installation interactive (défaut).
 NONINTERACTIVE=false
 AUDIT_MODE=false
 CHECK_DNS_MODE=false
@@ -340,13 +375,16 @@ if $FIX_DNS && ! $CHECK_DNS_MODE; then
   die "--fix nécessite --check-dns. Usage : sudo $0 --check-dns --fix"
 fi
 
-# Détection mode domain-*
+# Détection mode domain-* — si un flag domain est actif, on charge la config
+# existante sans lancer l'installation complète (exécution ciblée).
 DOMAIN_MODE=false
 if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" || -n "$DOMAIN_EXPORT" || -n "$DOMAIN_IMPORT" || -n "$DOMAIN_STAGING" || -n "$DOMAIN_PROMOTE" || -n "$DOMAIN_SET_GROUP" || "$GROUP_LIST_MODE" == "true" ]]; then
   DOMAIN_MODE=true
 fi
 
-# Détection exécution via pipe (curl | bash)
+# Détection exécution via pipe (curl | bash) — stdin n'est pas un terminal.
+# Problème : read/whiptail ne fonctionnent pas quand stdin est un pipe.
+# Solution : forcer --noninteractive et exiger une config pré-existante.
 if [[ ! -t 0 ]]; then
   PIPED_MODE=true
   if [[ ! -f "/root/.bootstrap.conf" ]]; then
@@ -575,7 +613,10 @@ print_dns_actions() {
 }
 
 # ---------------------------------- Correction DNS automatique -------------------------
-# Délègue à dm_setup_dns (A, AAAA, SPF, DKIM, DMARC, CAA) + dm_setup_ptr (reverse)
+# fix_dns — Corrige tous les enregistrements DNS via l'API OVH (upsert).
+# Séquence : domaine principal (A, AAAA, SPF, DKIM, DMARC, CAA, PTR),
+# puis itération sur tous les domaines additionnels de domains.conf.
+# Le MX n'est jamais touché automatiquement car il est géré par OVH MX Plan.
 fix_dns() {
   # MX : ne pas toucher (géré par OVH MX Plan)
   if [[ -z "${DNS_MX:-}" ]]; then
@@ -780,6 +821,12 @@ if $BACKUP_MODE; then
 fi
 
 # ================================== MODES --domain-* ==================================
+# Chaque opération domain-* suit le pattern :
+#   1. Snapshot automatique (avant modification destructive)
+#   2. Hook pre-{action} (pour les plugins utilisateur)
+#   3. Action (via les fonctions dm_* de domain-manager.sh)
+#   4. Hook post-{action}
+#   5. Récapitulatif + exit 0 (pas de fall-through)
 
 # --- --domain-list ---
 if $DOMAIN_LIST_MODE; then
@@ -802,6 +849,9 @@ if $DOMAIN_LIST_MODE; then
 fi
 
 # --- --domain-add ---
+# Séquence complète en 8 étapes : register → DKIM → OpenDKIM → parking → DNS → SSL → VHost → logrotate
+# Chaque étape est tolérante aux erreurs (warn au lieu de die) pour permettre
+# l'ajout partiel (ex: DNS échoue car pas de credentials OVH → le VHost fonctionne quand même).
 if [[ -n "$DOMAIN_ADD" ]]; then
   section "Ajout du domaine : ${DOMAIN_ADD}"
   local_selector="${DOMAIN_ADD_SELECTOR:-mail}"
@@ -882,6 +932,9 @@ if [[ -n "$DOMAIN_ADD" ]]; then
 fi
 
 # --- --domain-remove ---
+# Suppression douce : on retire VHosts + logrotate + registre + OpenDKIM,
+# mais on conserve DKIM keys, SSL certs et fichiers web (par prudence).
+# Le domaine principal (HOSTNAME_FQDN) ne peut jamais être supprimé.
 if [[ -n "$DOMAIN_REMOVE" ]]; then
   section "Suppression du domaine : ${DOMAIN_REMOVE}"
 
