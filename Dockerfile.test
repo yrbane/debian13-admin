@@ -1,0 +1,12 @@
+FROM debian:trixie-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    bats bash coreutils procps openssl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt/scripts
+COPY . .
+
+RUN chmod +x tests/*.bats
+
+CMD ["bats", "tests/"]
