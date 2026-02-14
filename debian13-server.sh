@@ -74,6 +74,8 @@ source "${LIB_DIR}/backup.sh"
 source "${LIB_DIR}/hooks.sh"
 # shellcheck source=lib/clone.sh
 source "${LIB_DIR}/clone.sh"
+# shellcheck source=lib/tui.sh
+source "${LIB_DIR}/tui.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
