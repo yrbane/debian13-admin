@@ -218,6 +218,7 @@ CLONE_PORT="22"
 DASHBOARD_DOMAIN=""
 ROLLBACK_ID=""
 SNAPSHOT_LIST_MODE=false
+DKIM_ROTATE_DOMAIN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -284,6 +285,10 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$ROLLBACK_ID" ]] && die "--rollback nécessite un ID de snapshot."
       ;;
     --snapshot-list) SNAPSHOT_LIST_MODE=true ;;
+    --dkim-rotate)
+      shift; DKIM_ROTATE_DOMAIN="${1:-}"
+      [[ -z "$DKIM_ROTATE_DOMAIN" ]] && die "--dkim-rotate nécessite un nom de domaine."
+      ;;
     --clone-keygen) CLONE_KEYGEN=true ;;
     --clone)
       shift; CLONE_TARGET="${1:-}"
@@ -926,6 +931,20 @@ if [[ -n "$ROLLBACK_ID" ]]; then
   load_config
   snapshot_restore "$ROLLBACK_ID" || exit 1
   log "Rollback terminé. Vérifiez avec : sudo $0 --audit"
+  exit 0
+fi
+
+# --- --dkim-rotate ---
+if [[ -n "$DKIM_ROTATE_DOMAIN" ]]; then
+  section "Rotation DKIM : ${DKIM_ROTATE_DOMAIN}"
+  load_config
+  snapshot_create "before-dkim-rotate-${DKIM_ROTATE_DOMAIN}" >/dev/null 2>&1 || true
+  dm_rotate_dkim "$DKIM_ROTATE_DOMAIN"
+  dm_rebuild_opendkim
+  local_new_sel=$(dm_get_selector "$DKIM_ROTATE_DOMAIN")
+  log "Nouveau sélecteur : ${local_new_sel}"
+  log "Publiez le DNS : sudo $0 --check-dns --fix"
+  log "Rollback si nécessaire : sudo $0 --snapshot-list"
   exit 0
 fi
 

@@ -184,6 +184,35 @@ dm_generate_dkim_key() {
   chown -R opendkim:opendkim "$keydir"
 }
 
+# Rotation de clé DKIM : génère un nouveau sélecteur daté, conserve l'ancien
+# $1 = domain
+dm_rotate_dkim() {
+  local domain="$1"
+  if ! dm_domain_exists "$domain"; then
+    err "Domaine non enregistré : ${domain}"
+    return 1
+  fi
+
+  local old_sel
+  old_sel=$(dm_get_selector "$domain")
+  local new_sel="mail$(date +%Y%m%d)"
+
+  # Avoid collision with existing key
+  if [[ -f "${DKIM_KEYDIR}/${domain}/${new_sel}.private" ]]; then
+    new_sel="${new_sel}r${RANDOM}"
+  fi
+
+  log "DKIM rotation: ${domain} ${old_sel} → ${new_sel}"
+  dm_generate_dkim_key "$domain" "$new_sel"
+
+  # Update selector in domains.conf
+  dm_unregister_domain "$domain"
+  dm_register_domain "$domain" "$new_sel"
+
+  log "DKIM rotation terminée. Ancien sélecteur '${old_sel}' conservé."
+  log "Publiez le nouveau DNS, puis supprimez l'ancien après 48h."
+}
+
 # ==============================================================================
 # Deploiement : parking page, VHosts, logrotate
 # ==============================================================================
