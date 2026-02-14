@@ -343,9 +343,9 @@ log "Core dumps désactivés dans limits.conf"
 # Umask 027
 if [[ -f /etc/login.defs ]]; then
   if grep -q "^UMASK" /etc/login.defs; then
-    sed -i 's/^UMASK.*/UMASK\t\t027/' /etc/login.defs
+    sed -i '/^UMASK/c\UMASK\t\t027' /etc/login.defs
   else
-    echo -e "UMASK\t\t027" >> /etc/login.defs
+    printf 'UMASK\t\t027\n' >> /etc/login.defs
   fi
   log "Umask durci à 027 dans /etc/login.defs"
 fi

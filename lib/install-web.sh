@@ -217,6 +217,7 @@ if $INSTALL_POSTFIX_DKIM; then
   postconf -e "smtpd_tls_security_level=may"
   postconf -e "smtp_tls_note_starttls_offer=yes"
   postconf -e "smtp_tls_CAfile=/etc/ssl/certs/ca-certificates.crt"
+  postconf -e "smtputf8_enable=no"
 
   adduser opendkim postfix || true
   mkdir -p /etc/opendkim/{keys,conf.d,domains}
@@ -416,4 +417,52 @@ RENEWHOOK
   fi
 
   log "Certbot installé avec hook de renouvellement Apache."
+fi
+
+# ---------------------------------- 9) DNS auto-config (SPF/DKIM/DMARC) ----------------
+if $INSTALL_POSTFIX_DKIM && [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
+  section "Configuration DNS automatique (SPF/DKIM/DMARC)"
+  log "Credentials OVH détectés — vérification de l'accès API..."
+
+  if ! ovh_test_credentials 2>/dev/null; then
+    warn "Credentials OVH invalides ou expirés. Configuration DNS ignorée."
+    warn "Recréez les credentials sur : https://eu.api.ovh.com/createToken/"
+    warn "Puis mettez à jour ${OVH_DNS_CREDENTIALS}"
+  else
+    log "API OVH accessible — configuration automatique des enregistrements DNS..."
+
+    # Récupérer l'IP publique du serveur
+    SERVER_IP="${SERVER_IP:-$(curl -s -4 ifconfig.me 2>/dev/null || curl -s -4 icanhazip.com 2>/dev/null)}"
+    if [[ -z "${SERVER_IP:-}" ]]; then
+      warn "Impossible de déterminer l'IP publique. Configuration DNS ignorée."
+    else
+      # SPF
+      log "Configuration SPF pour ${DKIM_DOMAIN} (IP: ${SERVER_IP})..."
+      ovh_setup_spf "$DKIM_DOMAIN" "$SERVER_IP" && log "SPF configuré." || warn "Erreur configuration SPF."
+
+      # DKIM
+      dkim_pub="${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
+      if [[ -f "$dkim_pub" ]]; then
+        log "Configuration DKIM (${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN})..."
+        ovh_setup_dkim "$DKIM_DOMAIN" "$DKIM_SELECTOR" "$dkim_pub" && log "DKIM configuré." || warn "Erreur configuration DKIM."
+      else
+        warn "Fichier clé publique DKIM non trouvé (${dkim_pub}). DKIM DNS non configuré."
+      fi
+
+      # DMARC
+      log "Configuration DMARC pour ${DKIM_DOMAIN}..."
+      ovh_setup_dmarc "$DKIM_DOMAIN" "${EMAIL_FOR_CERTBOT}" && log "DMARC configuré." || warn "Erreur configuration DMARC."
+
+      log "Enregistrements DNS configurés. Propagation en cours..."
+      note "Vérification : dig TXT ${DKIM_DOMAIN} @8.8.8.8"
+      note "Vérification : dig TXT ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} @8.8.8.8"
+      note "Vérification : dig TXT _dmarc.${DKIM_DOMAIN} @8.8.8.8"
+    fi
+  fi
+
+  # Test de délivrabilité email (même si DNS échoue, tester l'envoi Postfix)
+  if command -v mail >/dev/null 2>&1; then
+    section "Test de délivrabilité email"
+    ovh_test_mail "${EMAIL_FOR_CERTBOT}" "${HOSTNAME_FQDN}" || true
+  fi
 fi

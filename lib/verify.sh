@@ -43,7 +43,7 @@ emit_section() {
 }
 
 emit_section_close() {
-  [[ "$CHECK_MODE" == "html" ]] && close_section
+  [[ "$CHECK_MODE" == "html" ]] && close_section || true
 }
 
 # ---- Fonctions de vérification (partagées CLI/HTML via emit_check) ----

@@ -64,6 +64,8 @@ source "${LIB_DIR}/constants.sh"
 source "${LIB_DIR}/helpers.sh"
 # shellcheck source=lib/config.sh
 source "${LIB_DIR}/config.sh"
+# shellcheck source=lib/ovh-api.sh
+source "${LIB_DIR}/ovh-api.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -79,6 +81,7 @@ show_help() {
   printf "  ${GREEN}--noninteractive${RESET}    N'affiche pas les questions ; utilise les valeurs par défaut.\n"
   printf "  ${GREEN}--audit${RESET}             Vérifications + rapport email, sans installation.\n"
   printf "  ${GREEN}--check-dns${RESET}         Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
+  printf "  ${GREEN}--renew-ovh${RESET}         Regénérer les credentials API OVH (certificat wildcard).\n"
   printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}          Affiche cette aide.\n"
   printf "\n"
 
@@ -126,6 +129,7 @@ show_help() {
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --noninteractive${RESET}  # Valeurs par défaut\n"
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --audit${RESET}           # Audit uniquement\n"
   printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns${RESET}       # Vérification DNS/DKIM\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --renew-ovh${RESET}       # Regénérer credentials OVH\n"
   printf "\n"
 }
 
@@ -133,12 +137,14 @@ show_help() {
 NONINTERACTIVE=false
 AUDIT_MODE=false
 CHECK_DNS_MODE=false
+RENEW_OVH_MODE=false
 PIPED_MODE=false
 for arg in "$@"; do
   case "$arg" in
     --noninteractive) NONINTERACTIVE=true ;;
     --audit) AUDIT_MODE=true ;;
     --check-dns) CHECK_DNS_MODE=true ;;
+    --renew-ovh) RENEW_OVH_MODE=true ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $arg"; show_help; exit 1 ;;
   esac
@@ -173,12 +179,12 @@ if ! grep -qi 'debian' /etc/os-release; then
   warn "Distribution non détectée comme Debian. Le script cible Debian 13 (trixie)."
 fi
 
-if [[ "${AUDIT_MODE:-false}" != "true" && "${CHECK_DNS_MODE:-false}" != "true" ]]; then
+if [[ "${AUDIT_MODE:-false}" != "true" && "${CHECK_DNS_MODE:-false}" != "true" && "${RENEW_OVH_MODE:-false}" != "true" ]]; then
   preflight_checks
 fi
 
 # ---------------------------------- Configuration -------------------------------------
-if $AUDIT_MODE || $CHECK_DNS_MODE; then
+if $AUDIT_MODE || $CHECK_DNS_MODE || $RENEW_OVH_MODE; then
   if [[ -f "$CONFIG_FILE" ]]; then
     load_config
     apply_config_defaults
@@ -331,6 +337,116 @@ if $CHECK_DNS_MODE; then
   printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
   echo ""
   print_dns_actions
+  exit 0
+fi
+
+# ================================== MODE --renew-ovh ====================================
+if $RENEW_OVH_MODE; then
+  section "Regénération des credentials API OVH"
+
+  if ! ${CERTBOT_WILDCARD:-false}; then
+    warn "CERTBOT_WILDCARD n'est pas activé dans la configuration."
+    if ! prompt_yes_no "Voulez-vous quand même configurer des credentials OVH ?" "n"; then
+      exit 0
+    fi
+  fi
+
+  # Afficher les credentials actuels (masqués)
+  if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
+    local_ak=$(grep 'application_key' "${OVH_DNS_CREDENTIALS}" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+    local_ck=$(grep 'consumer_key' "${OVH_DNS_CREDENTIALS}" 2>/dev/null | cut -d'=' -f2 | tr -d ' ')
+    echo ""
+    note "Credentials actuels (${OVH_DNS_CREDENTIALS}) :"
+    note "  Application Key : ${local_ak:0:4}****${local_ak: -4}"
+    note "  Consumer Key    : ${local_ck:0:4}****${local_ck: -4}"
+    echo ""
+
+    # Tester la validité des credentials actuels
+    note "Test de validité des credentials actuels..."
+    _OVH_AK="" _OVH_AS="" _OVH_CK=""  # Forcer le rechargement
+    if ovh_test_credentials 2>/dev/null; then
+      log "Credentials actuels valides."
+      if ! prompt_yes_no "Les credentials fonctionnent. Voulez-vous quand même les remplacer ?" "n"; then
+        exit 0
+      fi
+    else
+      warn "Credentials actuels invalides ou expirés."
+    fi
+
+    # Backup de l'ancien fichier
+    backup_file "${OVH_DNS_CREDENTIALS}"
+    log "Ancien fichier sauvegardé."
+  else
+    note "Aucun fichier de credentials existant (${OVH_DNS_CREDENTIALS})."
+  fi
+
+  # Demander les nouveaux credentials
+  echo ""
+  echo "Créez un nouveau token sur :"
+  echo "  ${BOLD}https://eu.api.ovh.com/createToken/${RESET}"
+  echo ""
+  echo "Droits requis :"
+  echo "  GET    /domain/zone/*"
+  echo "  POST   /domain/zone/*"
+  echo "  DELETE /domain/zone/*"
+  echo ""
+
+  NEW_APP_KEY="$(prompt_default "Application Key" "")"
+  NEW_APP_SECRET="$(prompt_default "Application Secret" "")"
+  NEW_CONSUMER_KEY="$(prompt_default "Consumer Key" "")"
+
+  if [[ -z "$NEW_APP_KEY" || -z "$NEW_APP_SECRET" || -z "$NEW_CONSUMER_KEY" ]]; then
+    die "Credentials incomplets. Aucune modification effectuée."
+  fi
+
+  # Écrire le nouveau fichier
+  cat > "${OVH_DNS_CREDENTIALS}" <<OVHCREDS
+dns_ovh_endpoint = ${OVH_API_ENDPOINT}
+dns_ovh_application_key = ${NEW_APP_KEY}
+dns_ovh_application_secret = ${NEW_APP_SECRET}
+dns_ovh_consumer_key = ${NEW_CONSUMER_KEY}
+OVHCREDS
+  chmod 600 "${OVH_DNS_CREDENTIALS}"
+  log "Nouveaux credentials sauvegardés dans ${OVH_DNS_CREDENTIALS} (mode 600)"
+
+  # Tester les nouveaux credentials
+  _OVH_AK="" _OVH_AS="" _OVH_CK=""  # Forcer le rechargement
+  echo ""
+  note "Test des nouveaux credentials..."
+  if ovh_test_credentials 2>/dev/null; then
+    log "Nouveaux credentials valides !"
+  else
+    warn "Les nouveaux credentials ne fonctionnent pas."
+    warn "Vérifiez vos clés sur https://eu.api.ovh.com/console/"
+    warn "Le fichier ${OVH_DNS_CREDENTIALS} a été mis à jour mais les clés semblent invalides."
+  fi
+
+  # Proposer le renouvellement du certificat
+  if ${CERTBOT_WILDCARD:-false} && [[ -d "/etc/letsencrypt/live/${HOSTNAME_FQDN}" ]]; then
+    echo ""
+    if prompt_yes_no "Forcer le renouvellement du certificat wildcard avec les nouveaux credentials ?" "y"; then
+      log "Renouvellement du certificat wildcard en cours..."
+      certbot certonly \
+        --dns-ovh \
+        --dns-ovh-credentials "${OVH_DNS_CREDENTIALS}" \
+        --dns-ovh-propagation-seconds "${CERTBOT_DNS_PROPAGATION}" \
+        -d "${HOSTNAME_FQDN}" \
+        -d "*.${HOSTNAME_FQDN}" \
+        --email "${EMAIL_FOR_CERTBOT}" \
+        --agree-tos \
+        --non-interactive \
+        --force-renewal \
+        2>&1 | tee -a "${LOG_FILE:-/var/log/bootstrap_ovh_debian13.log}"
+
+      if systemctl is-active --quiet apache2; then
+        systemctl reload apache2
+        log "Apache rechargé."
+      fi
+    fi
+  fi
+
+  echo ""
+  log "Opération terminée."
   exit 0
 fi
 
