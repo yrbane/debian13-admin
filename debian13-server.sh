@@ -66,6 +66,8 @@ source "${LIB_DIR}/helpers.sh"
 source "${LIB_DIR}/config.sh"
 # shellcheck source=lib/ovh-api.sh
 source "${LIB_DIR}/ovh-api.sh"
+# shellcheck source=lib/domain-manager.sh
+source "${LIB_DIR}/domain-manager.sh"
 
 # ---------------------------------- Aide / usage --------------------------------------
 show_help() {
@@ -77,23 +79,39 @@ show_help() {
   printf "  sudo ./${SCRIPT_NAME}.sh [OPTIONS]\n"
   printf "\n"
 
-  printf "${BOLD}${MAGENTA}OPTIONS:${RESET}\n"
-  printf "  ${GREEN}--noninteractive${RESET}    N'affiche pas les questions ; utilise les valeurs par défaut.\n"
-  printf "  ${GREEN}--audit${RESET}             Vérifications + rapport email, sans installation.\n"
-  printf "  ${GREEN}--check-dns${RESET}         Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
-  printf "  ${GREEN}--fix${RESET}               Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
-  printf "  ${GREEN}--renew-ovh${RESET}         Regénérer les credentials API OVH (certificat wildcard).\n"
-  printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}          Affiche cette aide.\n"
+  printf "${BOLD}${MAGENTA}OPTIONS GÉNÉRALES :${RESET}\n"
+  printf "  ${GREEN}--noninteractive${RESET}          N'affiche pas les questions ; utilise les valeurs par défaut.\n"
+  printf "  ${GREEN}--audit${RESET}                   Vérifications + rapport email, sans installation.\n"
+  printf "  ${GREEN}--check-dns${RESET}               Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
+  printf "  ${GREEN}--fix${RESET}                     Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
+  printf "  ${GREEN}--renew-ovh${RESET}               Regénérer les credentials API OVH (certificat wildcard).\n"
+  printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}                Affiche cette aide.\n"
+  printf "\n"
+
+  printf "${BOLD}${MAGENTA}GESTION MULTI-DOMAINES :${RESET}\n"
+  printf "  ${GREEN}--domain-add <dom> [sel]${RESET}  Ajouter un domaine sur le serveur.\n"
+  printf "                            Crée automatiquement : clé DKIM, VHosts Apache,\n"
+  printf "                            certificat SSL, enregistrements DNS (via OVH API),\n"
+  printf "                            page parking WebGL et rotation des logs.\n"
+  printf "                            Le sélecteur DKIM est optionnel ${YELLOW}(défaut: mail)${RESET}.\n"
+  printf "  ${GREEN}--domain-remove <dom>${RESET}     Retirer un domaine (VHosts + logrotate + OpenDKIM).\n"
+  printf "                            Les clés DKIM, certificats SSL et fichiers web\n"
+  printf "                            sont conservés (nettoyage manuel si nécessaire).\n"
+  printf "                            Le domaine principal ne peut pas être supprimé.\n"
+  printf "  ${GREEN}--domain-list${RESET}             Lister tous les domaines gérés avec leur sélecteur DKIM.\n"
+  printf "  ${GREEN}--domain-check [dom]${RESET}      Vérifier la configuration d'un domaine (DNS, DKIM,\n"
+  printf "                            SPF, DMARC, SSL, VHost). Sans argument : vérifie\n"
+  printf "                            tous les domaines enregistrés.\n"
   printf "\n"
 
   printf "${BOLD}${MAGENTA}PARAMÈTRES${RESET} (mode interactif, sinon valeurs par défaut) :\n"
-  printf "  - HOSTNAME_FQDN    ${YELLOW}(défaut: %s)${RESET}\n" "${HOSTNAME_FQDN_DEFAULT}"
-  printf "  - SSH_PORT         ${YELLOW}(défaut: %s)${RESET}\n" "${SSH_PORT_DEFAULT}"
-  printf "  - ADMIN_USER       ${YELLOW}(défaut: %s)${RESET}\n" "${ADMIN_USER_DEFAULT}"
-  printf "  - DKIM_SELECTOR    ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_SELECTOR_DEFAULT}"
-  printf "  - DKIM_DOMAIN      ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_DOMAIN_DEFAULT}"
+  printf "  - HOSTNAME_FQDN     ${YELLOW}(défaut: %s)${RESET}\n" "${HOSTNAME_FQDN_DEFAULT}"
+  printf "  - SSH_PORT          ${YELLOW}(défaut: %s)${RESET}\n" "${SSH_PORT_DEFAULT}"
+  printf "  - ADMIN_USER        ${YELLOW}(défaut: %s)${RESET}\n" "${ADMIN_USER_DEFAULT}"
+  printf "  - DKIM_SELECTOR     ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_SELECTOR_DEFAULT}"
+  printf "  - DKIM_DOMAIN       ${YELLOW}(défaut: %s)${RESET}\n" "${DKIM_DOMAIN_DEFAULT}"
   printf "  - EMAIL_FOR_CERTBOT ${YELLOW}(défaut: %s)${RESET}\n" "${EMAIL_FOR_CERTBOT_DEFAULT}"
-  printf "  - TIMEZONE         ${YELLOW}(défaut: %s)${RESET}\n" "${TIMEZONE_DEFAULT}"
+  printf "  - TIMEZONE          ${YELLOW}(défaut: %s)${RESET}\n" "${TIMEZONE_DEFAULT}"
   printf "\n"
 
   printf "${BOLD}${MAGENTA}COMPOSANTS INSTALLABLES${RESET} (question par question) :\n"
@@ -103,7 +121,7 @@ show_help() {
   printf "  - Apache + PHP + durcissements\n"
   printf "  - MariaDB (hardening basique)\n"
   printf "  - phpMyAdmin (URL sécurisée aléatoire)\n"
-  printf "  - Postfix send-only + OpenDKIM (signature DKIM sortante)\n"
+  printf "  - Postfix send-only + OpenDKIM (signature DKIM multi-domaines)\n"
   printf "  - Certbot (Let's Encrypt) + intégration Apache\n"
   printf "  - Outils dev (Git, Curl, build-essential)\n"
   printf "  - Node.js via nvm (LTS)\n"
@@ -116,22 +134,38 @@ show_help() {
 
   printf "${BOLD}${MAGENTA}NOTES DNS & SÉCURITÉ :${RESET}\n"
   printf "  - MX chez OVH : le serveur n'écoute pas SMTP entrant (relay local désactivé).\n"
-  printf "  - DKIM (sélecteur ${YELLOW}\"mail\"${RESET}) : vérifier la correspondance clé publique/privée.\n"
-  printf "  - SPF/DMARC : configurés correctement = emails non-spam.\n"
+  printf "  - DKIM : une clé par domaine, sélecteur configurable (défaut ${YELLOW}\"mail\"${RESET}).\n"
+  printf "    OpenDKIM signe automatiquement selon le From: via signingtable.\n"
+  printf "  - SPF/DMARC : configurés par domaine = emails non-spam.\n"
+  printf "  - Multi-domaines : chaque domaine ajouté via --domain-add obtient ses propres\n"
+  printf "    enregistrements DNS (A, AAAA, SPF, DKIM, DMARC, CAA), VHosts et certificat.\n"
   printf "\n"
 
   printf "${BOLD}${MAGENTA}FICHIER DE CONFIGURATION :${RESET}\n"
   printf "  Après les questions, un fichier ${YELLOW}.conf${RESET} est créé à côté du script.\n"
   printf "  Les exécutions suivantes proposent de réutiliser cette configuration.\n"
+  printf "  Le registre des domaines est stocké dans ${YELLOW}domains.conf${RESET}.\n"
   printf "\n"
 
   printf "${BOLD}${MAGENTA}EXEMPLES :${RESET}\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh${RESET}                  # Exécution standard\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --noninteractive${RESET}  # Valeurs par défaut\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --audit${RESET}           # Audit uniquement\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns${RESET}       # Vérification DNS/DKIM\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns --fix${RESET} # Vérification + correction auto DNS\n"
-  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --renew-ovh${RESET}       # Regénérer credentials OVH\n"
+  printf "\n"
+  printf "  ${BOLD}Installation & audit :${RESET}\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh${RESET}                       # Exécution standard (interactif)\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --noninteractive${RESET}       # Valeurs par défaut\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --audit${RESET}                # Audit uniquement (rapport email)\n"
+  printf "\n"
+  printf "  ${BOLD}DNS & certificats :${RESET}\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns${RESET}            # Vérification DNS/DKIM/SPF/DMARC\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --check-dns --fix${RESET}      # Vérification + correction auto DNS OVH\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --renew-ovh${RESET}            # Regénérer credentials API OVH\n"
+  printf "\n"
+  printf "  ${BOLD}Multi-domaines :${RESET}\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-add example.com${RESET}          # Ajouter (sélecteur: mail)\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-add example.com dkim2025${RESET} # Ajouter (sélecteur custom)\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-list${RESET}                     # Lister les domaines\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-check example.com${RESET}        # Vérifier un domaine\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-check${RESET}                    # Vérifier tous les domaines\n"
+  printf "  ${GREEN}sudo ./${SCRIPT_NAME}.sh --domain-remove example.com${RESET}       # Retirer un domaine\n"
   printf "\n"
 }
 
@@ -142,21 +176,54 @@ CHECK_DNS_MODE=false
 RENEW_OVH_MODE=false
 FIX_DNS=false
 PIPED_MODE=false
-for arg in "$@"; do
-  case "$arg" in
+DOMAIN_ADD=""
+DOMAIN_ADD_SELECTOR=""
+DOMAIN_REMOVE=""
+DOMAIN_LIST_MODE=false
+DOMAIN_CHECK=""
+DOMAIN_CHECK_ALL=false
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
     --audit) AUDIT_MODE=true ;;
     --check-dns) CHECK_DNS_MODE=true ;;
     --fix) FIX_DNS=true ;;
     --renew-ovh) RENEW_OVH_MODE=true ;;
+    --domain-add)
+      shift; DOMAIN_ADD="${1:-}"
+      [[ -z "$DOMAIN_ADD" ]] && die "--domain-add nécessite un nom de domaine."
+      # Sélecteur optionnel en argument suivant (s'il ne commence pas par --)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        shift; DOMAIN_ADD_SELECTOR="$1"
+      fi
+      ;;
+    --domain-remove)
+      shift; DOMAIN_REMOVE="${1:-}"
+      [[ -z "$DOMAIN_REMOVE" ]] && die "--domain-remove nécessite un nom de domaine."
+      ;;
+    --domain-list) DOMAIN_LIST_MODE=true ;;
+    --domain-check)
+      if [[ -n "${2:-}" && "${2:-}" != --* ]]; then
+        shift; DOMAIN_CHECK="$1"
+      else
+        DOMAIN_CHECK_ALL=true
+      fi
+      ;;
     --help|-h) show_help; exit 0 ;;
-    *) err "Option inconnue: $arg"; show_help; exit 1 ;;
+    *) err "Option inconnue: $1"; show_help; exit 1 ;;
   esac
+  shift
 done
 
 # Validation : --fix nécessite --check-dns
 if $FIX_DNS && ! $CHECK_DNS_MODE; then
   die "--fix nécessite --check-dns. Usage : sudo $0 --check-dns --fix"
+fi
+
+# Détection mode domain-*
+DOMAIN_MODE=false
+if [[ -n "$DOMAIN_ADD" || -n "$DOMAIN_REMOVE" || "$DOMAIN_LIST_MODE" == "true" || -n "$DOMAIN_CHECK" || "$DOMAIN_CHECK_ALL" == "true" ]]; then
+  DOMAIN_MODE=true
 fi
 
 # Détection exécution via pipe (curl | bash)
@@ -188,17 +255,17 @@ if ! grep -qi 'debian' /etc/os-release; then
   warn "Distribution non détectée comme Debian. Le script cible Debian 13 (trixie)."
 fi
 
-if [[ "${AUDIT_MODE:-false}" != "true" && "${CHECK_DNS_MODE:-false}" != "true" && "${RENEW_OVH_MODE:-false}" != "true" ]]; then
+if [[ "${AUDIT_MODE:-false}" != "true" && "${CHECK_DNS_MODE:-false}" != "true" && "${RENEW_OVH_MODE:-false}" != "true" && "${DOMAIN_MODE:-false}" != "true" ]]; then
   preflight_checks
 fi
 
 # ---------------------------------- Configuration -------------------------------------
-if $AUDIT_MODE || $CHECK_DNS_MODE || $RENEW_OVH_MODE; then
+if $AUDIT_MODE || $CHECK_DNS_MODE || $RENEW_OVH_MODE || $DOMAIN_MODE; then
   if [[ -f "$CONFIG_FILE" ]]; then
     load_config
     apply_config_defaults
   else
-    die "Mode audit/check-dns : fichier de configuration ${CONFIG_FILE} requis. Exécutez d'abord le script normalement."
+    die "Fichier de configuration ${CONFIG_FILE} requis. Exécutez d'abord le script normalement."
   fi
 elif ! $NONINTERACTIVE; then
   if [[ -f "$CONFIG_FILE" ]]; then
@@ -234,7 +301,7 @@ else
 fi
 
 # Chemins/constantes dérivées (readonly après affectation)
-readonly DKIM_KEYDIR="/etc/opendkim/keys/${DKIM_DOMAIN}"
+DKIM_KEYDIR="${DKIM_KEYDIR_BASE:-/etc/opendkim/keys}"
 readonly LOG_FILE="/var/log/bootstrap_ovh_debian13.log"
 USER_HOME="$(get_user_home)"
 DEBIAN_FRONTEND=noninteractive
@@ -310,9 +377,9 @@ print_dns_actions() {
     log "DKIM ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} → configuré"
   else
     warn "DKIM : ajouter l'enregistrement TXT suivant :"
-    if [[ -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" ]]; then
-      print_note "Contenu de ${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt :"
-      print_cmd "$(cat "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null || echo '(fichier introuvable)')"
+    if [[ -f "${DKIM_KEYDIR}/${DKIM_DOMAIN}/${DKIM_SELECTOR}.txt" ]]; then
+      print_note "Contenu de ${DKIM_KEYDIR}/${DKIM_DOMAIN}/${DKIM_SELECTOR}.txt :"
+      print_cmd "$(cat "${DKIM_KEYDIR}/${DKIM_DOMAIN}/${DKIM_SELECTOR}.txt" 2>/dev/null || echo '(fichier introuvable)')"
     else
       print_cmd "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}.   IN TXT   \"v=DKIM1; k=rsa; p=...\""
       print_note "Générer la clé : opendkim-genkey -s ${DKIM_SELECTOR} -d ${DKIM_DOMAIN}"
@@ -386,169 +453,33 @@ print_dns_actions() {
 }
 
 # ---------------------------------- Correction DNS automatique -------------------------
+# Délègue à dm_setup_dns (A, AAAA, SPF, DKIM, DMARC, CAA) + dm_setup_ptr (reverse)
 fix_dns() {
-  local fix_ok=0 fix_fail=0
-  local subdomain=""
-
-  # Extraire le sous-domaine : si HOSTNAME_FQDN=srv.example.com et BASE_DOMAIN=example.com → subdomain=srv
-  if [[ "$HOSTNAME_FQDN" != "$BASE_DOMAIN" ]]; then
-    subdomain="${HOSTNAME_FQDN%%."$BASE_DOMAIN"}"
-  fi
-
-  # --- A record ---
-  if [[ "${DNS_A:-}" != "${SERVER_IP:-}" ]]; then
-    log "DNS fix : A ${HOSTNAME_FQDN} → ${SERVER_IP}"
-    local rid
-    rid=$(ovh_dns_find "$BASE_DOMAIN" "$subdomain" "A" 2>/dev/null) || rid=""
-    if [[ -n "$rid" ]]; then
-      if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP}\"" 2>/dev/null; then
-        log "DNS fix : A record OK"; ((++fix_ok))
-      else
-        warn "DNS fix : A record échoué"; ((++fix_fail))
-      fi
-    else
-      if ovh_dns_create "$BASE_DOMAIN" "$subdomain" "A" "\"${SERVER_IP}\"" 2>/dev/null; then
-        log "DNS fix : A record créé OK"; ((++fix_ok))
-      else
-        warn "DNS fix : A record création échouée"; ((++fix_fail))
-      fi
-    fi
-  fi
-
-  # --- www A record ---
-  if [[ "${DNS_WWW:-}" != "${SERVER_IP:-}" ]]; then
-    log "DNS fix : A www.${HOSTNAME_FQDN} → ${SERVER_IP}"
-    local www_sub="www"
-    [[ -n "$subdomain" ]] && www_sub="www.${subdomain}"
-    local rid
-    rid=$(ovh_dns_find "$BASE_DOMAIN" "$www_sub" "A" 2>/dev/null) || rid=""
-    if [[ -n "$rid" ]]; then
-      if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP}\"" 2>/dev/null; then
-        log "DNS fix : www A record OK"; ((++fix_ok))
-      else
-        warn "DNS fix : www A record échoué"; ((++fix_fail))
-      fi
-    else
-      if ovh_dns_create "$BASE_DOMAIN" "$www_sub" "A" "\"${SERVER_IP}\"" 2>/dev/null; then
-        log "DNS fix : www A record créé OK"; ((++fix_ok))
-      else
-        warn "DNS fix : www A record création échouée"; ((++fix_fail))
-      fi
-    fi
-  fi
-
-  # --- AAAA record (IPv6) ---
-  if [[ -n "${SERVER_IP6:-}" ]]; then
-    if [[ "${DNS_AAAA:-}" != "${SERVER_IP6}" ]]; then
-      log "DNS fix : AAAA ${HOSTNAME_FQDN} → ${SERVER_IP6}"
-      local rid
-      rid=$(ovh_dns_find "$BASE_DOMAIN" "$subdomain" "AAAA" 2>/dev/null) || rid=""
-      if [[ -n "$rid" ]]; then
-        if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP6}\"" 2>/dev/null; then
-          log "DNS fix : AAAA record OK"; ((++fix_ok))
-        else
-          warn "DNS fix : AAAA record échoué"; ((++fix_fail))
-        fi
-      else
-        if ovh_dns_create "$BASE_DOMAIN" "$subdomain" "AAAA" "\"${SERVER_IP6}\"" 2>/dev/null; then
-          log "DNS fix : AAAA record créé OK"; ((++fix_ok))
-        else
-          warn "DNS fix : AAAA record création échouée"; ((++fix_fail))
-        fi
-      fi
-    fi
-
-    # --- www AAAA record ---
-    if [[ "${DNS_WWW6:-}" != "${SERVER_IP6}" ]]; then
-      log "DNS fix : AAAA www.${HOSTNAME_FQDN} → ${SERVER_IP6}"
-      local www_sub="www"
-      [[ -n "$subdomain" ]] && www_sub="www.${subdomain}"
-      local rid
-      rid=$(ovh_dns_find "$BASE_DOMAIN" "$www_sub" "AAAA" 2>/dev/null) || rid=""
-      if [[ -n "$rid" ]]; then
-        if ovh_dns_update "$BASE_DOMAIN" "$rid" "\"${SERVER_IP6}\"" 2>/dev/null; then
-          log "DNS fix : www AAAA record OK"; ((++fix_ok))
-        else
-          warn "DNS fix : www AAAA record échoué"; ((++fix_fail))
-        fi
-      else
-        if ovh_dns_create "$BASE_DOMAIN" "$www_sub" "AAAA" "\"${SERVER_IP6}\"" 2>/dev/null; then
-          log "DNS fix : www AAAA record créé OK"; ((++fix_ok))
-        else
-          warn "DNS fix : www AAAA record création échouée"; ((++fix_fail))
-        fi
-      fi
-    fi
-  fi
-
-  # --- MX : ne pas toucher (géré par OVH MX Plan) ---
+  # MX : ne pas toucher (géré par OVH MX Plan)
   if [[ -z "${DNS_MX:-}" ]]; then
     note "DNS fix : MX non configuré — géré par OVH (MX Plan), pas de correction automatique."
   fi
 
-  # --- SPF ---
-  if [[ -z "${DNS_SPF:-}" ]]; then
-    log "DNS fix : SPF ${BASE_DOMAIN}"
-    if ovh_setup_spf "$BASE_DOMAIN" "$SERVER_IP" 2>/dev/null; then
-      log "DNS fix : SPF OK"; ((++fix_ok))
-    else
-      warn "DNS fix : SPF échoué"; ((++fix_fail))
-    fi
-  fi
+  # Domaine principal : A, AAAA, SPF, DKIM, DMARC, CAA
+  dm_setup_dns "$HOSTNAME_FQDN" "$DKIM_SELECTOR"
+  local fix_ok=$DM_DNS_OK fix_fail=$DM_DNS_FAIL
 
-  # --- DKIM ---
-  if [[ -z "${DNS_DKIM:-}" || "${DNS_DKIM:-}" != *"v=DKIM1"* ]]; then
-    if [[ -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" ]]; then
-      log "DNS fix : DKIM ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}"
-      if ovh_setup_dkim "$BASE_DOMAIN" "$DKIM_SELECTOR" "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null; then
-        log "DNS fix : DKIM OK"; ((++fix_ok))
-      else
-        warn "DNS fix : DKIM échoué"; ((++fix_fail))
-      fi
-    else
-      warn "DNS fix : DKIM ignoré — fichier clé ${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt introuvable"
-    fi
-  fi
+  # PTR (reverse DNS) — spécifique au domaine principal
+  dm_setup_ptr "$HOSTNAME_FQDN"
+  ((fix_ok += DM_PTR_OK))
+  ((fix_fail += DM_PTR_FAIL))
 
-  # --- DMARC ---
-  if [[ -z "${DNS_DMARC:-}" || "${DNS_DMARC:-}" == *"p=none"* ]]; then
-    log "DNS fix : DMARC _dmarc.${BASE_DOMAIN}"
-    if ovh_setup_dmarc "$BASE_DOMAIN" "$EMAIL_FOR_CERTBOT" 2>/dev/null; then
-      log "DNS fix : DMARC OK"; ((++fix_ok))
-    else
-      warn "DNS fix : DMARC échoué"; ((++fix_fail))
-    fi
-  fi
-
-  # --- PTR IPv4 ---
-  if [[ -n "${SERVER_IP:-}" && "${DNS_PTR:-}" != "$HOSTNAME_FQDN" ]]; then
-    log "DNS fix : PTR IPv4 ${SERVER_IP} → ${HOSTNAME_FQDN}"
-    if ovh_ip_reverse_set "$SERVER_IP" "$HOSTNAME_FQDN" 2>/dev/null; then
-      log "DNS fix : PTR IPv4 OK"; ((++fix_ok))
-    else
-      warn "DNS fix : PTR IPv4 échoué"; ((++fix_fail))
-    fi
-  fi
-
-  # --- PTR IPv6 ---
-  if [[ -n "${SERVER_IP6:-}" && "${DNS_PTR6:-}" != "$HOSTNAME_FQDN" ]]; then
-    log "DNS fix : PTR IPv6 ${SERVER_IP6} → ${HOSTNAME_FQDN}"
-    if ovh_ip_reverse_set "$SERVER_IP6" "$HOSTNAME_FQDN" 2>/dev/null; then
-      log "DNS fix : PTR IPv6 OK"; ((++fix_ok))
-    else
-      warn "DNS fix : PTR IPv6 échoué"; ((++fix_fail))
-    fi
-  fi
-
-  # --- CAA ---
-  if [[ -z "${DNS_CAA:-}" ]]; then
-    log "DNS fix : CAA ${BASE_DOMAIN} → letsencrypt.org"
-    if ovh_dns_create "$BASE_DOMAIN" "" "CAA" "\"0 issue \\\"letsencrypt.org\\\"\"" 2>/dev/null; then
-      log "DNS fix : CAA OK"; ((++fix_ok))
-    else
-      warn "DNS fix : CAA échoué"; ((++fix_fail))
-    fi
-  fi
+  # Domaines additionnels
+  local _dm_line _dm_domain _dm_selector
+  while IFS= read -r _dm_line; do
+    _dm_domain="${_dm_line%%:*}"
+    _dm_selector="${_dm_line#*:}"
+    [[ "$_dm_domain" == "${DKIM_DOMAIN}" ]] && continue
+    log "DNS fix multi-domaines : ${_dm_domain}"
+    dm_setup_dns "$_dm_domain" "$_dm_selector"
+    ((fix_ok += DM_DNS_OK))
+    ((fix_fail += DM_DNS_FAIL))
+  done < <(dm_list_domains)
 
   echo ""
   printf "${BOLD}  Corrections : ${GREEN}%d réussie(s)${RESET} | ${RED}%d échouée(s)${RESET}\n" "$fix_ok" "$fix_fail"
@@ -578,12 +509,8 @@ if $CHECK_DNS_MODE; then
     log "Credentials OVH valides."
     echo ""
 
-    # Corriger les enregistrements DNS
+    # Corriger les enregistrements DNS (domaine principal + additionnels)
     fix_dns
-
-    # Appliquer les changements de zone
-    note "Application des changements de zone DNS..."
-    ovh_dns_refresh "$BASE_DOMAIN" 2>/dev/null || warn "Impossible de rafraîchir la zone ${BASE_DOMAIN}"
 
     # Pause propagation
     note "Attente de 10 secondes pour la propagation DNS..."
@@ -714,6 +641,166 @@ OVHCREDS
   exit 0
 fi
 
+# ================================== MODES --domain-* ==================================
+
+# --- --domain-list ---
+if $DOMAIN_LIST_MODE; then
+  section "Domaines gérés"
+  if [[ -f "$DOMAINS_CONF" ]] && [[ -s "$DOMAINS_CONF" ]]; then
+    local_count=0
+    while IFS= read -r line; do
+      domain="${line%%:*}"
+      selector="${line#*:}"
+      printf "  ${GREEN}%s${RESET}  (sélecteur DKIM: ${YELLOW}%s${RESET})\n" "$domain" "$selector"
+      ((++local_count))
+    done < <(dm_list_domains)
+    echo ""
+    log "${local_count} domaine(s) enregistré(s)."
+  else
+    note "Aucun domaine enregistré."
+    note "Ajoutez un domaine : sudo $0 --domain-add example.com"
+  fi
+  exit 0
+fi
+
+# --- --domain-add ---
+if [[ -n "$DOMAIN_ADD" ]]; then
+  section "Ajout du domaine : ${DOMAIN_ADD}"
+  local_selector="${DOMAIN_ADD_SELECTOR:-mail}"
+
+  if dm_domain_exists "$DOMAIN_ADD"; then
+    warn "Le domaine ${DOMAIN_ADD} est déjà enregistré."
+    note "Utilisez --domain-check ${DOMAIN_ADD} pour vérifier sa configuration."
+    exit 0
+  fi
+
+  # 1. Enregistrer
+  log "Enregistrement de ${DOMAIN_ADD} (sélecteur: ${local_selector})..."
+  dm_register_domain "$DOMAIN_ADD" "$local_selector"
+
+  # 2. Générer clé DKIM
+  log "Génération de la clé DKIM..."
+  dm_generate_dkim_key "$DOMAIN_ADD" "$local_selector" || warn "Échec génération DKIM"
+
+  # 3. Reconstruire OpenDKIM
+  log "Reconstruction des tables OpenDKIM..."
+  dm_rebuild_opendkim
+
+  # 4. Page parking
+  log "Déploiement de la page parking..."
+  dm_deploy_parking "$DOMAIN_ADD"
+  chown -R "${WEB_USER:-www-data}:${WEB_USER:-www-data}" "${WEB_ROOT:-/var/www}/${DOMAIN_ADD}" 2>/dev/null || true
+
+  # 5. DNS OVH (si credentials disponibles)
+  if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
+    log "Configuration DNS via API OVH..."
+    _OVH_AK="" _OVH_AS="" _OVH_CK=""
+    if ovh_test_credentials 2>/dev/null; then
+      dm_setup_dns "$DOMAIN_ADD" "$local_selector"
+    else
+      warn "Credentials OVH invalides. DNS non configuré automatiquement."
+    fi
+  else
+    note "Pas de credentials OVH — configurez le DNS manuellement."
+  fi
+
+  # 6. SSL
+  log "Obtention du certificat SSL..."
+  dm_obtain_ssl "$DOMAIN_ADD" "${EMAIL_FOR_CERTBOT}" || warn "Échec obtention SSL (configurer le DNS d'abord ?)"
+
+  # 7. VHosts Apache
+  log "Déploiement des VHosts Apache..."
+  dm_deploy_vhosts "$DOMAIN_ADD"
+  # Activer les sites
+  if command -v a2ensite >/dev/null 2>&1; then
+    a2ensite "000-${DOMAIN_ADD}-redirect.conf" 2>/dev/null || true
+    a2ensite "010-${DOMAIN_ADD}.conf" 2>/dev/null || true
+    systemctl reload apache2 2>/dev/null || true
+  fi
+
+  # 8. Logrotate
+  log "Configuration logrotate..."
+  dm_deploy_logrotate "$DOMAIN_ADD"
+
+  # Récap
+  echo ""
+  section "Récapitulatif — ${DOMAIN_ADD}"
+  print_title "Domaine ajouté"
+  print_note "DKIM: ${local_selector}._domainkey.${DOMAIN_ADD}"
+  print_note "VHost: https://${DOMAIN_ADD}"
+  print_note "Parking: ${WEB_ROOT:-/var/www}/${DOMAIN_ADD}/www/public/"
+  print_note "Logs: /var/log/apache2/${DOMAIN_ADD}/"
+  echo ""
+  print_note "Vérifier le domaine :"
+  print_cmd "sudo $0 --domain-check ${DOMAIN_ADD}"
+  echo ""
+  exit 0
+fi
+
+# --- --domain-remove ---
+if [[ -n "$DOMAIN_REMOVE" ]]; then
+  section "Suppression du domaine : ${DOMAIN_REMOVE}"
+
+  # Interdire la suppression du domaine principal
+  if [[ "$DOMAIN_REMOVE" == "${HOSTNAME_FQDN}" || "$DOMAIN_REMOVE" == "${DKIM_DOMAIN:-}" ]]; then
+    die "Impossible de supprimer le domaine principal (${DOMAIN_REMOVE})."
+  fi
+
+  if ! dm_domain_exists "$DOMAIN_REMOVE"; then
+    die "Le domaine ${DOMAIN_REMOVE} n'est pas enregistré."
+  fi
+
+  # Confirmation interactive
+  warn "Cette action va supprimer les VHosts et la config logrotate pour ${DOMAIN_REMOVE}."
+  warn "Les clés DKIM, certificats SSL et fichiers web seront conservés."
+  if ! prompt_yes_no "Confirmer la suppression de ${DOMAIN_REMOVE} ?" "n"; then
+    log "Suppression annulée."
+    exit 0
+  fi
+
+  # Suppression
+  dm_remove_vhosts "$DOMAIN_REMOVE"
+  dm_remove_logrotate "$DOMAIN_REMOVE"
+  dm_unregister_domain "$DOMAIN_REMOVE"
+  dm_rebuild_opendkim
+
+  if command -v a2ensite >/dev/null 2>&1; then
+    systemctl reload apache2 2>/dev/null || true
+  fi
+
+  log "Domaine ${DOMAIN_REMOVE} supprimé."
+  warn "Fichiers conservés (nettoyage manuel si nécessaire) :"
+  print_note "  DKIM: ${DKIM_KEYDIR}/${DOMAIN_REMOVE}/"
+  print_note "  SSL:  /etc/letsencrypt/live/${DOMAIN_REMOVE}/"
+  print_note "  Web:  ${WEB_ROOT:-/var/www}/${DOMAIN_REMOVE}/"
+  echo ""
+  exit 0
+fi
+
+# --- --domain-check ---
+if [[ -n "$DOMAIN_CHECK" ]] || $DOMAIN_CHECK_ALL; then
+  CHECK_MODE="cli"
+  CHECKS_OK=0; CHECKS_WARN=0; CHECKS_FAIL=0
+
+  if [[ -n "$DOMAIN_CHECK" ]]; then
+    dm_check_domain "$DOMAIN_CHECK"
+  else
+    section "Vérification de tous les domaines"
+    while IFS= read -r line; do
+      domain="${line%%:*}"
+      selector="${line#*:}"
+      dm_check_domain "$domain" "$selector"
+    done < <(dm_list_domains)
+  fi
+
+  echo ""
+  printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+  printf "${BOLD}  Résultat : ${GREEN}%d OK${RESET} | ${YELLOW}%d avertissements${RESET} | ${RED}%d erreurs${RESET}\n" "$CHECKS_OK" "$CHECKS_WARN" "$CHECKS_FAIL"
+  printf "${BOLD}══════════════════════════════════════════════════════════════${RESET}\n"
+  echo ""
+  exit 0
+fi
+
 # ================================== INSTALLATION ======================================
 if ! $AUDIT_MODE; then
   apt_update_upgrade
@@ -777,7 +864,7 @@ print_title "DKIM (OpenDKIM)"
 print_note "Vérification correspondance clé publique/privée :"
 print_cmd "opendkim-testkey -d ${DKIM_DOMAIN} -s ${DKIM_SELECTOR} -x /etc/opendkim.conf"
 print_note "Si mismatch, mettre à jour le TXT ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}"
-print_note "Clé publique : ${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
+print_note "Clé publique : ${DKIM_KEYDIR}/${DKIM_DOMAIN}/${DKIM_SELECTOR}.txt"
 echo ""
 
 print_title "Vérification emails (Postfix)"
@@ -946,6 +1033,17 @@ if $INSTALL_APACHE_PHP; then
   print_note "Logs VHost     : /var/log/apache2/${HOSTNAME_FQDN}/"
   echo ""
 fi
+
+print_title "Gestion multi-domaines"
+print_note "Ajouter un domaine :"
+print_cmd "sudo ${0} --domain-add example.com"
+print_note "Lister les domaines :"
+print_cmd "sudo ${0} --domain-list"
+print_note "Vérifier un domaine :"
+print_cmd "sudo ${0} --domain-check example.com"
+print_note "Supprimer un domaine :"
+print_cmd "sudo ${0} --domain-remove example.com"
+echo ""
 
 print_dns_actions
 

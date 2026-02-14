@@ -278,31 +278,26 @@ if $INSTALL_POSTFIX_DKIM; then
 
   adduser opendkim postfix || true
   mkdir -p /etc/opendkim/{keys,conf.d,domains}
-  mkdir -p "${DKIM_KEYDIR}"
+  local dm_keydir="${DKIM_KEYDIR_BASE}/${DKIM_DOMAIN}"
+  mkdir -p "$dm_keydir"
   chown -R opendkim:opendkim /etc/opendkim
   chmod -R go-rwx /etc/opendkim
 
-  # Configure OpenDKIM uniquement si la clé n'existe pas (première installation)
-  # ou si les fichiers de config sont absents
+  # Migration : ancien layout flat -> multi-domaine (keys/{domain}/{selector}.private)
+  local old_key="${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.private"
+  local new_key="${dm_keydir}/${DKIM_SELECTOR}.private"
+  if [[ -f "$old_key" && ! -f "$new_key" ]]; then
+    log "Migration DKIM: ${old_key} -> ${new_key}"
+    mv "$old_key" "$new_key"
+    [[ -f "${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.txt" ]] && mv "${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.txt" "${dm_keydir}/${DKIM_SELECTOR}.txt"
+    chown -R opendkim:opendkim "$dm_keydir"
+  fi
+
+  # Générer la clé si absente
   DKIM_NEEDS_CONFIG=false
-  if [[ ! -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.private" ]]; then
+  if [[ ! -f "$new_key" ]]; then
     DKIM_NEEDS_CONFIG=true
-    # S'assurer que le répertoire est accessible pour la génération
-    chmod 755 "${DKIM_KEYDIR}"
-    # Supprimer les fichiers partiels s'ils existent
-    rm -f "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt" 2>/dev/null || true
-    # Générer la clé
-    if opendkim-genkey -s "${DKIM_SELECTOR}" -d "${DKIM_DOMAIN}" -b "${DKIM_KEY_BITS}" -r -D "${DKIM_KEYDIR}"; then
-      chown opendkim:opendkim "${DKIM_KEYDIR}/${DKIM_SELECTOR}.private"
-      chmod 600 "${DKIM_KEYDIR}/${DKIM_SELECTOR}.private"
-      chmod 644 "${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
-    else
-      warn "Échec de génération de clé DKIM. Vérifiez manuellement."
-      DKIM_NEEDS_CONFIG=false  # Pas de config sans clé valide
-    fi
-    # Restaurer les permissions restrictives
-    chmod 750 "${DKIM_KEYDIR}"
-    chown -R opendkim:opendkim "${DKIM_KEYDIR}"
+    dm_generate_dkim_key "${DKIM_DOMAIN}" "${DKIM_SELECTOR}" || DKIM_NEEDS_CONFIG=false
   elif [[ ! -f /etc/opendkim/signingtable ]] || [[ ! -f /etc/opendkim/keytable ]]; then
     DKIM_NEEDS_CONFIG=true
     log "Clé DKIM existante, mais fichiers de config manquants. Reconfiguration..."
@@ -310,8 +305,10 @@ if $INSTALL_POSTFIX_DKIM; then
     log "OpenDKIM déjà configuré. Clé et config existantes conservées."
   fi
 
-  # Ne (re)configurer que si nécessaire
-  if $DKIM_NEEDS_CONFIG; then
+  # Enregistrer le domaine principal et reconstruire la config OpenDKIM
+  if $DKIM_NEEDS_CONFIG || ! dm_domain_exists "${DKIM_DOMAIN}"; then
+    dm_register_domain "${DKIM_DOMAIN}" "${DKIM_SELECTOR}"
+
     backup_file /etc/opendkim.conf
     cat >/etc/opendkim.conf <<EOF
 Syslog                  yes
@@ -331,20 +328,8 @@ InternalHosts           /etc/opendkim/trustedhosts
 SignatureAlgorithm      rsa-sha256
 EOF
 
-    cat >/etc/opendkim/signingtable <<EOF
-*@${DKIM_DOMAIN} ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}
-EOF
-
-    cat >/etc/opendkim/keytable <<EOF
-${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} ${DKIM_DOMAIN}:${DKIM_SELECTOR}:${DKIM_KEYDIR}/${DKIM_SELECTOR}.private
-EOF
-
-    cat >/etc/opendkim/trustedhosts <<'EOF'
-127.0.0.1
-localhost
-::1
-EOF
-    note "Configuration OpenDKIM créée/mise à jour."
+    dm_rebuild_opendkim --no-restart
+    note "Configuration OpenDKIM créée/mise à jour (multi-domaines)."
   fi
 
   # Ces paramètres Postfix peuvent être réappliqués sans risque
@@ -480,35 +465,8 @@ fi
 if $INSTALL_APACHE_PHP; then
   section "VirtualHost HTTPS + Page de parking"
 
-  # Structure des répertoires
-  mkdir -p "/var/www/${HOSTNAME_FQDN}/www/public/css"
-  mkdir -p "/var/log/apache2/${HOSTNAME_FQDN}"
-
-  # Déployer la page de parking (HTML + CSS)
-  PARKING_HTML_TEMPLATE="${SCRIPT_DIR}/templates/parking-page.html"
-  [[ ! -f "$PARKING_HTML_TEMPLATE" ]] && PARKING_HTML_TEMPLATE="${SCRIPTS_DIR}/templates/parking-page.html"
-  if [[ -f "$PARKING_HTML_TEMPLATE" ]]; then
-    cp "$PARKING_HTML_TEMPLATE" "/var/www/${HOSTNAME_FQDN}/www/public/index.html"
-    sed -i "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "/var/www/${HOSTNAME_FQDN}/www/public/index.html"
-  else
-    warn "Template parking-page.html non trouvé."
-  fi
-
-  PARKING_CSS_TEMPLATE="${SCRIPT_DIR}/templates/parking-style.css"
-  [[ ! -f "$PARKING_CSS_TEMPLATE" ]] && PARKING_CSS_TEMPLATE="${SCRIPTS_DIR}/templates/parking-style.css"
-  if [[ -f "$PARKING_CSS_TEMPLATE" ]]; then
-    cp "$PARKING_CSS_TEMPLATE" "/var/www/${HOSTNAME_FQDN}/www/public/css/style.css"
-  else
-    warn "Template parking-style.css non trouvé."
-  fi
-
-  # Générer robots.txt (Disallow all — parking page)
-  cat > "/var/www/${HOSTNAME_FQDN}/www/public/robots.txt" <<'ROBOTSTXT'
-User-agent: *
-Disallow: /
-ROBOTSTXT
-
-  # Permissions
+  # Page de parking + robots.txt (via domain-manager)
+  dm_deploy_parking "${HOSTNAME_FQDN}"
   chown -R "${WEB_USER}:${WEB_USER}" "/var/www/${HOSTNAME_FQDN}"
 
   # Déployer les VHosts si le certificat SSL existe
@@ -520,34 +478,15 @@ ROBOTSTXT
     a2dissite 000-default.conf 2>/dev/null || true
     a2dissite default-ssl.conf 2>/dev/null || true
 
-    # --- VHost HTTP → HTTPS redirect ---
-    VHOST_HTTP_TEMPLATE="${SCRIPT_DIR}/templates/vhost-http-redirect.conf.template"
-    [[ ! -f "$VHOST_HTTP_TEMPLATE" ]] && VHOST_HTTP_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-http-redirect.conf.template"
-    if [[ -f "$VHOST_HTTP_TEMPLATE" ]]; then
-      sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_HTTP_TEMPLATE" \
-        > "/etc/apache2/sites-available/000-${HOSTNAME_FQDN}-redirect.conf"
-      a2ensite "000-${HOSTNAME_FQDN}-redirect.conf"
-    fi
+    # VHosts HTTP redirect + HTTPS (via domain-manager)
+    dm_deploy_vhosts "${HOSTNAME_FQDN}"
+    a2ensite "000-${HOSTNAME_FQDN}-redirect.conf"
+    a2ensite "010-${HOSTNAME_FQDN}.conf"
 
-    # --- VHost HTTPS apex + www redirect ---
-    VHOST_HTTPS_TEMPLATE="${SCRIPT_DIR}/templates/vhost-https.conf.template"
-    [[ ! -f "$VHOST_HTTPS_TEMPLATE" ]] && VHOST_HTTPS_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-https.conf.template"
-    if [[ -f "$VHOST_HTTPS_TEMPLATE" ]]; then
-      sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_HTTPS_TEMPLATE" \
-        > "/etc/apache2/sites-available/010-${HOSTNAME_FQDN}.conf"
-      a2ensite "010-${HOSTNAME_FQDN}.conf"
-    fi
-
-    # --- VHost wildcard (only if wildcard cert detected) ---
+    # VHost wildcard (seulement si certificat wildcard détecté)
     if openssl x509 -in "${CERT_DIR}/cert.pem" -noout -text 2>/dev/null | grep -q "\\*.${HOSTNAME_FQDN}"; then
-      VHOST_WILD_TEMPLATE="${SCRIPT_DIR}/templates/vhost-wildcard.conf.template"
-      [[ ! -f "$VHOST_WILD_TEMPLATE" ]] && VHOST_WILD_TEMPLATE="${SCRIPTS_DIR}/templates/vhost-wildcard.conf.template"
-      if [[ -f "$VHOST_WILD_TEMPLATE" ]]; then
-        sed "s|__HOSTNAME_FQDN__|${HOSTNAME_FQDN}|g" "$VHOST_WILD_TEMPLATE" \
-          > "/etc/apache2/sites-available/020-${HOSTNAME_FQDN}-wildcard.conf"
-        a2ensite "020-${HOSTNAME_FQDN}-wildcard.conf"
-        log "VHost wildcard *.${HOSTNAME_FQDN} activé."
-      fi
+      dm_deploy_vhost_wildcard "${HOSTNAME_FQDN}"
+      a2ensite "020-${HOSTNAME_FQDN}-wildcard.conf"
     else
       note "Certificat non-wildcard — VHost wildcard non déployé."
       note "Pour activer : certbot certonly --dns-ovh -d ${HOSTNAME_FQDN} -d '*.${HOSTNAME_FQDN}'"
@@ -568,23 +507,8 @@ ROBOTSTXT
     note "  Puis relancez ce script pour déployer les VHosts."
   fi
 
-  # Logrotate dédié par domaine
-  cat > "/etc/logrotate.d/apache-vhost-${HOSTNAME_FQDN}" <<LOGROTATE
-/var/log/apache2/${HOSTNAME_FQDN}/*.log {
-    daily
-    rotate 90
-    compress
-    delaycompress
-    missingok
-    notifempty
-    sharedscripts
-    postrotate
-        systemctl reload apache2 > /dev/null 2>&1 || true
-    endscript
-}
-LOGROTATE
-
-  log "Logrotate configuré pour /var/log/apache2/${HOSTNAME_FQDN}/"
+  # Logrotate (via domain-manager)
+  dm_deploy_logrotate "${HOSTNAME_FQDN}"
 fi
 
 # ---------------------------------- 9) DNS auto-config (SPF/DKIM/DMARC) ----------------
@@ -604,24 +528,8 @@ if $INSTALL_POSTFIX_DKIM && [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
     if [[ -z "${SERVER_IP:-}" ]]; then
       warn "Impossible de déterminer l'IP publique. Configuration DNS ignorée."
     else
-      # SPF
-      log "Configuration SPF pour ${DKIM_DOMAIN} (IP: ${SERVER_IP})..."
-      ovh_setup_spf "$DKIM_DOMAIN" "$SERVER_IP" && log "SPF configuré." || warn "Erreur configuration SPF."
-
-      # DKIM
-      dkim_pub="${DKIM_KEYDIR}/${DKIM_SELECTOR}.txt"
-      if [[ -f "$dkim_pub" ]]; then
-        log "Configuration DKIM (${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN})..."
-        ovh_setup_dkim "$DKIM_DOMAIN" "$DKIM_SELECTOR" "$dkim_pub" && log "DKIM configuré." || warn "Erreur configuration DKIM."
-      else
-        warn "Fichier clé publique DKIM non trouvé (${dkim_pub}). DKIM DNS non configuré."
-      fi
-
-      # DMARC
-      log "Configuration DMARC pour ${DKIM_DOMAIN}..."
-      ovh_setup_dmarc "$DKIM_DOMAIN" "${EMAIL_FOR_CERTBOT}" && log "DMARC configuré." || warn "Erreur configuration DMARC."
-
-      log "Enregistrements DNS configurés. Propagation en cours..."
+      dm_setup_dns "${DKIM_DOMAIN}" "${DKIM_SELECTOR}"
+      log "DNS: ${DM_DNS_OK} OK, ${DM_DNS_FAIL} échec(s)"
       note "Vérification : dig TXT ${DKIM_DOMAIN} @8.8.8.8"
       note "Vérification : dig TXT ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} @8.8.8.8"
       note "Vérification : dig TXT _dmarc.${DKIM_DOMAIN} @8.8.8.8"

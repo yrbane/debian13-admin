@@ -75,6 +75,10 @@ readonly WEB_USER="www-data"
 readonly ERROR_THROTTLE_SECONDS=300
 readonly THREE_JS_VERSION="r175"
 
+# Multi-domaines
+readonly DOMAINS_CONF="${SCRIPTS_DIR}/domains.conf"
+readonly DKIM_KEYDIR_BASE="/etc/opendkim/keys"
+
 # Couleurs HTML (charte Since & Co)
 readonly HTML_COLOR_DARK="#142136"
 readonly HTML_COLOR_ACCENT="#dc5c3b"
