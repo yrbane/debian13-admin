@@ -82,6 +82,31 @@ teardown() { teardown_test_env; }
   [ ! -f "${LOGROTATE_DIR}/apache-vhost-example.com" ]
 }
 
+# --- dm_render_template guard ---
+@test "render_template: fails when template missing" {
+  run dm_render_template "nonexistent.html" "example.com" "${TEST_DIR}/out.html"
+  [ "$status" -ne 0 ]
+  [ ! -f "${TEST_DIR}/out.html" ]
+}
+
+@test "deploy_parking: fails when HTML template missing" {
+  local saved="$TEMPLATES_DIR"
+  TEMPLATES_DIR="${TEST_DIR}/empty_templates"
+  mkdir -p "$TEMPLATES_DIR"
+  run dm_deploy_parking "example.com"
+  TEMPLATES_DIR="$saved"
+  [ "$status" -ne 0 ]
+}
+
+@test "deploy_vhosts: fails when VHost template missing" {
+  local saved="$TEMPLATES_DIR"
+  TEMPLATES_DIR="${TEST_DIR}/empty_templates"
+  mkdir -p "$TEMPLATES_DIR"
+  run dm_deploy_vhosts "example.com"
+  TEMPLATES_DIR="$saved"
+  [ "$status" -ne 0 ]
+}
+
 # --- idempotency ---
 @test "deploy_parking: idempotent (second run does not fail)" {
   dm_deploy_parking "example.com"

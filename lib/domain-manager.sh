@@ -22,6 +22,10 @@ dm_render_template() {
   local template="${TEMPLATES_DIR}/$1"
   local domain="$2"
   local dest="$3"
+  if [[ ! -f "$template" ]]; then
+    warn "Template introuvable: ${template}"
+    return 1
+  fi
   sed "s/__HOSTNAME_FQDN__/${domain}/g" "$template" > "$dest"
 }
 
@@ -186,7 +190,7 @@ dm_deploy_parking() {
   local docroot="${WEB_ROOT}/${domain}/www/public"
 
   mkdir -p "${docroot}/css"
-  dm_render_template "parking-page.html" "$domain" "${docroot}/index.html"
+  dm_render_template "parking-page.html" "$domain" "${docroot}/index.html" || return 1
   cp "${TEMPLATES_DIR}/parking-style.css" "${docroot}/css/style.css"
 
   cat > "${docroot}/robots.txt" <<'EOF'
@@ -202,9 +206,9 @@ dm_deploy_vhosts() {
 
   mkdir -p "${LOG_DIR}/${domain}" 2>/dev/null || true
   dm_render_template "vhost-http-redirect.conf.template" "$domain" \
-    "${APACHE_SITES_DIR}/000-${domain}-redirect.conf"
+    "${APACHE_SITES_DIR}/000-${domain}-redirect.conf" || return 1
   dm_render_template "vhost-https.conf.template" "$domain" \
-    "${APACHE_SITES_DIR}/010-${domain}.conf"
+    "${APACHE_SITES_DIR}/010-${domain}.conf" || return 1
   log "VHosts deployes pour ${domain}"
 }
 
@@ -212,7 +216,7 @@ dm_deploy_vhosts() {
 dm_deploy_vhost_wildcard() {
   local domain="$1"
   dm_render_template "vhost-wildcard.conf.template" "$domain" \
-    "${APACHE_SITES_DIR}/020-${domain}-wildcard.conf"
+    "${APACHE_SITES_DIR}/020-${domain}-wildcard.conf" || return 1
   log "VHost wildcard deploye pour ${domain}"
 }
 
