@@ -515,7 +515,8 @@ debian13-server.sh              ← Point d'entree unique
 
 <br>
 
-<sub>Usage prive — Auteur : Seb</sub>
+<sub>Unlicense — Domaine public</sub><br>
+<sub>Auteur : <a href="https://github.com/yrbane">Seb</a> · <a href="https://yrbane.github.io/debian13-admin/">Page projet</a></sub>
 
 <br>
 
