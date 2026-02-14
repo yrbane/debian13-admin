@@ -940,3 +940,63 @@ dm_list_databases() {
     [[ -n "$db" ]] && echo "${domain}:${db}"
   done < <(dm_list_domains)
 }
+
+# ==============================================================================
+# Conteneurisation (Docker/Podman)
+# ==============================================================================
+
+# Déployer un conteneur pour un domaine
+# $1 = domain, $2 = image, $3 = port interne (défaut: 80)
+dm_deploy_container() {
+  local domain="$1" image="$2" port="${3:-80}"
+  local container_name
+  container_name=$(echo "$domain" | tr '.' '-')
+  local host_port
+  host_port=$((8000 + RANDOM % 1000))
+
+  # Run container
+  docker run -d --name "$container_name" \
+    --restart unless-stopped \
+    -p "127.0.0.1:${host_port}:${port}" \
+    "$image"
+
+  # Store config
+  if declare -f dm_set_domain_config >/dev/null 2>&1; then
+    dm_set_domain_config "$domain" "CONTAINER_IMAGE" "$image"
+    dm_set_domain_config "$domain" "CONTAINER_NAME" "$container_name"
+    dm_set_domain_config "$domain" "CONTAINER_PORT" "$host_port"
+  fi
+
+  # Setup reverse proxy
+  dm_deploy_proxy "$domain" "http://127.0.0.1:${host_port}"
+
+  log "Container: ${container_name} (${image}) → port ${host_port}"
+}
+
+# Arrêter le conteneur d'un domaine
+# $1 = domain
+dm_stop_container() {
+  local domain="$1"
+  local container_name
+  container_name=$(echo "$domain" | tr '.' '-')
+  docker stop "$container_name"
+  log "Container: ${container_name} arrêté"
+}
+
+# Statut du conteneur d'un domaine
+# $1 = domain
+dm_container_status() {
+  local domain="$1"
+  local container_name
+  container_name=$(echo "$domain" | tr '.' '-')
+  docker ps --filter "name=${container_name}"
+}
+
+# Logs du conteneur d'un domaine
+# $1 = domain
+dm_container_logs() {
+  local domain="$1"
+  local container_name
+  container_name=$(echo "$domain" | tr '.' '-')
+  docker logs "$container_name"
+}
