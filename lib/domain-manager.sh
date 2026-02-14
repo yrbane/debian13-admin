@@ -1,8 +1,35 @@
 #!/usr/bin/env bash
-# lib/domain-manager.sh — Gestion multi-domaines (DKIM, VHost, SSL, DNS, parking)
-# Source par debian13-server.sh — Depend de: lib/core.sh, lib/constants.sh, lib/ovh-api.sh
+# lib/domain-manager.sh — Gestion multi-domaines
+# Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/ovh-api.sh
+#
+# Architecturé autour d'un registre central (domains.conf) et d'un ensemble
+# de fonctions préfixées dm_* qui opèrent sur ce registre. Chaque domaine
+# est une ligne "domaine:sélecteur_dkim" dans le fichier.
+#
+# Principes de conception :
+#
+#   1. CHEMINS INJECTABLES — Tous les chemins système sont définis via des
+#      variables avec valeur par défaut (syntaxe : "${VAR:=default}").
+#      Les tests bats surchargent ces variables vers des répertoires temp
+#      (via override_paths dans test_helper.sh), ce qui isole totalement
+#      les tests du système réel.
+#
+#   2. IDEMPOTENCE — Les fonctions de création (register, deploy_*) sont
+#      idempotentes : les appeler deux fois produit le même résultat.
+#      Implémenté via des guards (vérification d'existence avant écriture).
+#
+#   3. REBUILD TOTAL — OpenDKIM est régénéré entièrement à partir du
+#      registre (pas de modification incrémentale). Plus simple, plus sûr,
+#      et l'opération est quasi instantanée (<100 domaines).
+#
+#   4. TEMPLATE RENDERING — Les VHosts et pages parking sont générés
+#      depuis des templates avec substitution de __HOSTNAME_FQDN__.
+#      Centralise le HTML/config et facilite la personnalisation.
 
-# Chemins (overridable pour les tests)
+# --- Chemins (overridable pour les tests) ---
+# Syntaxe bash : "${VAR:=default}" affecte la valeur par défaut seulement
+# si la variable est vide ou non définie. Transparent en production,
+# indispensable pour l'injection de chemins en test.
 : "${DOMAINS_CONF:=${SCRIPTS_DIR:-/root/scripts}/domains.conf}"
 : "${DKIM_KEYDIR:=/etc/opendkim/keys}"
 : "${OPENDKIM_DIR:=/etc/opendkim}"
@@ -16,10 +43,12 @@
 
 # ==============================================================================
 # Helpers internes (DRY)
+# Fonctions privées (convention : appelées uniquement par ce fichier).
+# Extraites pour éviter la duplication dans les fonctions publiques.
 # ==============================================================================
 
-# Rendre un template : remplacer __HOSTNAME_FQDN__ par $domain et ecrire $dest
-# $1 = template (chemin relatif dans TEMPLATES_DIR), $2 = domain, $3 = dest
+# Rendre un template : remplacer __HOSTNAME_FQDN__ par $domain et écrire $dest.
+# Le domaine est échappé pour sed (les . / & \ sont des métacaractères).
 dm_render_template() {
   local template="${TEMPLATES_DIR}/$1"
   local domain="$2"
@@ -34,8 +63,9 @@ dm_render_template() {
   sed "s/__HOSTNAME_FQDN__/${safe_domain}/g" "$template" > "$dest"
 }
 
-# Upsert un enregistrement DNS OVH (find → update ou create)
-# $1=zone $2=subdomain $3=type $4=value  —  retourne 0=ok 1=fail
+# Upsert DNS OVH : cherche un enregistrement existant (par zone/sub/type),
+# le met à jour s'il existe, le crée sinon. Pattern classique create-or-update
+# qui rend les opérations DNS idempotentes.
 dm_dns_upsert() {
   local zone="$1" sub="$2" rtype="$3" value="$4"
   local rid
@@ -70,11 +100,17 @@ _dm_subdomain() {
 
 # ==============================================================================
 # Registre de domaines (domains.conf)
-# Format: domain:selector (un par ligne, commentaires #, lignes vides ignorees)
 # ==============================================================================
+# Format texte simple : une ligne par domaine, "domaine:sélecteur_dkim".
+# Les commentaires (#) et lignes vides sont ignorés.
+# Ce format a été choisi pour sa lisibilité et sa facilité d'édition manuelle.
+# Pour les métadonnées riches par domaine, voir la section "Per-domain config"
+# qui utilise un fichier .conf séparé par domaine dans domains.d/.
 
-# Extraire le domaine de base (TLD+1) d'un FQDN
-# Ex: srv.example.com -> example.com, example.com -> example.com
+# Extraire le domaine de base (TLD+1) d'un FQDN.
+# Utilisé pour déterminer la zone DNS OVH à manipuler.
+# Limitation : ne gère pas les TLD composés (.co.uk, .com.br).
+# Ex: srv.example.com → example.com, example.com → example.com
 dm_extract_base_domain() {
   local fqdn="$1"
   echo "$fqdn" | awk -F. '{print $(NF-1)"."$NF}'
@@ -122,11 +158,21 @@ dm_get_selector() {
 }
 
 # ==============================================================================
-# OpenDKIM — regeneration des tables depuis domains.conf
+# OpenDKIM — régénération des tables depuis domains.conf
 # ==============================================================================
+# OpenDKIM signe les emails sortants selon le champ From:.
+# Trois fichiers de config sont régénérés à chaque modification :
+#
+#   keytable     : associe "sélecteur._domainkey.domaine" → clé privée
+#   signingtable : associe "*@domaine" → entrée keytable correspondante
+#   trustedhosts : IPs autorisées à signer (localhost uniquement)
+#
+# Stratégie REBUILD TOTAL : on écrase les fichiers à chaque appel plutôt
+# que de les modifier incrémentalement. Avantages :
+#   - Pas de désynchronisation possible entre le registre et les tables
+#   - Code plus simple (pas de gestion d'ajout/suppression de lignes)
+#   - Performance acceptable (< 100 domaines = instantané)
 
-# Regenerer keytable, signingtable et trustedhosts
-# --no-restart : ne pas redemarrer opendkim (pour les tests)
 dm_rebuild_opendkim() {
   local do_restart=true
   [[ "${1:-}" == "--no-restart" ]] && do_restart=false
@@ -185,8 +231,10 @@ dm_generate_dkim_key() {
   chown -R opendkim:opendkim "$keydir"
 }
 
-# Rotation de clé DKIM : génère un nouveau sélecteur daté, conserve l'ancien
-# $1 = domain
+# Rotation de clé DKIM : génère un nouveau sélecteur horodaté (mail20260214),
+# met à jour le registre, mais conserve l'ancien sélecteur sur disque.
+# Procédure recommandée : publier le nouveau DNS, attendre 48h de propagation,
+# puis supprimer manuellement l'ancienne clé et l'ancien enregistrement DNS.
 dm_rotate_dkim() {
   local domain="$1"
   if ! dm_domain_exists "$domain"; then
@@ -215,10 +263,14 @@ dm_rotate_dkim() {
 }
 
 # ==============================================================================
-# Deploiement : parking page, VHosts, logrotate
+# Déploiement : parking page, VHosts, logrotate
 # ==============================================================================
+# Chaque domaine obtient une arborescence web, des VHosts Apache et une
+# config logrotate. Les VHosts sont numérotés pour contrôler l'ordre de
+# chargement Apache (000- redirect, 010- HTTPS, 015- proxy/mTLS, 020- wildcard).
 
-# Deployer la page parking WebGL pour un domaine
+# Page parking WebGL : page d'attente esthétique déployée immédiatement.
+# Le template parking-page.html contient un canvas Three.js animé.
 dm_deploy_parking() {
   local domain="$1"
   local docroot="${WEB_ROOT}/${domain}/www/public"
@@ -301,9 +353,12 @@ dm_remove_logrotate() {
 # ==============================================================================
 # SSL — obtention de certificat via certbot
 # ==============================================================================
+# Deux stratégies de validation Let's Encrypt selon la disponibilité
+# des credentials API OVH :
+#   - DNS-01 (OVH) : certificat wildcard *.domaine — nécessite l'API OVH
+#   - HTTP-01 (fallback) : certificat apex + www — fonctionne sans API
+# Le choix est automatique : si le fichier .ovh-dns.ini existe → DNS-01.
 
-# Obtenir un certificat SSL pour un domaine
-# DNS-01 wildcard si credentials OVH disponibles, sinon HTTP-01
 dm_obtain_ssl() {
   local domain="$1" email="${2:-${EMAIL_FOR_CERTBOT:-}}"
 
@@ -327,10 +382,12 @@ dm_obtain_ssl() {
 # ==============================================================================
 # DANE/TLSA — sécurisation TLS pour SMTP
 # ==============================================================================
+# DANE (DNS-based Authentication of Named Entities, RFC 6698) publie le hash
+# du certificat TLS dans le DNS. Les serveurs SMTP supportant DANE peuvent
+# vérifier que le certificat présenté correspond à celui publié, empêchant
+# les attaques MITM même avec une CA compromise.
+# Format TLSA : "3 1 1 <sha256>" = DANE-EE, SubjectPublicKeyInfo, SHA-256.
 
-# Générer un enregistrement TLSA (3 1 1) depuis un certificat
-# $1 = chemin vers le fichier cert.pem
-# Stdout: "3 1 1 <sha256hex>"
 dm_generate_tlsa_record() {
   local cert="$1"
   [[ -f "$cert" ]] || { warn "TLSA: certificat introuvable: ${cert}"; return 1; }
@@ -379,10 +436,11 @@ dm_setup_tlsa() {
 # ==============================================================================
 # DNS — configuration via API OVH
 # ==============================================================================
+# Séquence complète de configuration DNS pour un domaine :
+# A → AAAA → SPF → DKIM → DMARC → CAA → TLSA → refresh zone.
+# Les compteurs DM_DNS_OK / DM_DNS_FAIL permettent un résumé en fin d'opération.
+# Chaque enregistrement utilise dm_dns_upsert() (create-or-update idempotent).
 
-# Configurer tous les enregistrements DNS pour un domaine via OVH API
-# $1=domain $2=selector(defaut:mail)
-# Retourne le nombre de succes dans $DM_DNS_OK et echecs dans $DM_DNS_FAIL
 dm_setup_dns() {
   local domain="$1" selector="${2:-mail}"
   local base_domain
@@ -462,10 +520,12 @@ dm_setup_ptr() {
 }
 
 # ==============================================================================
-# Verification d'un domaine
+# Vérification d'un domaine
 # ==============================================================================
+# Audit en lecture seule : interroge les DNS publics (8.8.8.8) et vérifie
+# la présence de chaque enregistrement. Utilise emit_check() (lib/verify.sh)
+# pour un affichage ok/warn/fail cohérent avec le reste de l'audit.
 
-# Verification complete d'un domaine
 dm_check_domain() {
   local domain="$1" selector="${2:-}"
 
@@ -550,10 +610,12 @@ dm_check_domain() {
 # ==============================================================================
 # Export / Import de domaines
 # ==============================================================================
+# Migration de domaine entre serveurs : export vers archive tar.gz autonome
+# contenant un manifest (métadonnées) + tous les fichiers de config.
+# Le manifest permet de restaurer sans connaître les chemins d'origine.
+# Complémentaire au clonage complet (lib/clone.sh) : ici on exporte un
+# seul domaine, pas tout le serveur.
 
-# Exporter un domaine vers une archive tar.gz
-# $1 = domain, $2 = destination directory
-# Crée $dest/$domain.tar.gz contenant : manifest, dkim/, apache/, logrotate/, www/
 dm_export_domain() {
   local domain="$1" dest_dir="${2:-.}"
   local selector
@@ -680,11 +742,13 @@ dm_import_domain() {
 }
 
 # ==============================================================================
-# Per-domain configuration
+# Configuration par domaine (domains.d/)
 # ==============================================================================
+# Alors que domains.conf stocke uniquement domaine:sélecteur, le répertoire
+# domains.d/ contient un fichier .conf par domaine avec des paires clé=valeur
+# arbitraires (STAGING, GROUP, DB_NAME, CONTAINER_IMAGE, WAF_RATE_LIMIT...).
+# Format INI simplifié : une clé par ligne, pas de sections.
 
-# Set a config key for a domain
-# $1 = domain, $2 = key, $3 = value
 dm_set_domain_config() {
   local domain="$1" key="$2" value="$3"
   mkdir -p "$DOMAINS_CONF_DIR"
@@ -728,9 +792,10 @@ dm_list_domain_config() {
 # ==============================================================================
 # Staging mode
 # ==============================================================================
+# Déployer un domaine sans toucher au DNS ni demander de certificat SSL.
+# Utile pour préparer la config avant le basculement DNS, ou pour tester
+# en local. La promotion vers production efface le flag STAGING.
 
-# Deploy a domain in staging mode (no SSL via certbot, no DNS)
-# $1 = domain, $2 = selector (default: mail)
 dm_deploy_staging() {
   local domain="$1" selector="${2:-mail}"
   dm_register_domain "$domain" "$selector"
@@ -759,10 +824,12 @@ dm_promote_staging() {
 }
 
 # ==============================================================================
-# Domain groups
+# Groupes de domaines
 # ==============================================================================
+# Organiser les domaines par usage (production, staging, client-X, etc.).
+# Le groupe est stocké comme clé "GROUP" dans la config par domaine.
+# Permet d'appliquer des opérations en batch sur un sous-ensemble.
 
-# Assign a domain to a group
 dm_set_group() {
   local domain="$1" group="$2"
   dm_set_domain_config "$domain" "GROUP" "$group"
@@ -805,9 +872,11 @@ dm_list_groups() {
 # ==============================================================================
 # Reverse proxy
 # ==============================================================================
+# VHost Apache en mode reverse proxy : forward vers un backend applicatif
+# (Node, Python, Go...) avec support WebSocket (RewriteCond Upgrade) et
+# headers de sécurité standards. Le proxy écoute sur :443 et forward en HTTP
+# vers le backend local (pas de TLS interne — le backend est sur loopback).
 
-# Déployer un VHost reverse proxy pour un domaine
-# $1 = domain, $2 = backend URL (ex: http://localhost:3000)
 dm_deploy_proxy() {
   local domain="$1" backend="$2"
   local conf="${APACHE_SITES_DIR}/015-${domain}-proxy.conf"
@@ -849,9 +918,13 @@ dm_remove_proxy() {
 # ==============================================================================
 # Git push-to-deploy
 # ==============================================================================
+# Crée un dépôt git bare sur le serveur avec un hook post-receive qui
+# checkout automatiquement dans le DocumentRoot du domaine.
+# Workflow développeur : git remote add prod ssh://root@server/var/git/dom.git
+#                        git push prod main
+# Le hook fait un simple "git checkout -f" — pas de build, pas de restart.
+# Pour des workflows plus complexes, utiliser le système de hooks (lib/hooks.sh).
 
-# Configurer un dépôt git bare avec hook post-receive pour déploiement
-# $1 = domain
 dm_setup_git_deploy() {
   local domain="$1"
   local repo_dir="${GIT_REPOS_DIR}/${domain}.git"
@@ -879,11 +952,13 @@ dm_get_git_remote() {
 }
 
 # ==============================================================================
-# Per-domain database management
+# Gestion de bases de données par domaine
 # ==============================================================================
+# Un domaine = une base MariaDB + un utilisateur dédié. Le mot de passe est
+# généré aléatoirement et stocké dans la config par domaine (domains.d/).
+# Convention de nommage : les points et tirets du domaine sont remplacés
+# par des underscores (ex: app.example.com → app_example_com).
 
-# Créer une base de données et un utilisateur pour un domaine
-# $1 = domain
 dm_create_database() {
   local domain="$1"
   # Derive DB name from domain: dots → underscores
@@ -944,9 +1019,14 @@ dm_list_databases() {
 # ==============================================================================
 # Conteneurisation (Docker/Podman)
 # ==============================================================================
+# Déployer une application containerisée pour un domaine :
+# 1. Lancer le conteneur sur un port local aléatoire (8000-8999)
+# 2. Configurer un reverse proxy Apache vers ce port
+# 3. Stocker les métadonnées (image, port, nom) dans la config par domaine
+#
+# Le conteneur est bindé sur 127.0.0.1 uniquement — pas d'exposition directe.
+# Le nom du conteneur est dérivé du domaine (points → tirets).
 
-# Déployer un conteneur pour un domaine
-# $1 = domain, $2 = image, $3 = port interne (défaut: 80)
 dm_deploy_container() {
   local domain="$1" image="$2" port="${3:-80}"
   local container_name

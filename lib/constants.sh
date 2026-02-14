@@ -1,6 +1,19 @@
 #!/usr/bin/env bash
 # lib/constants.sh — Constantes readonly (chemins, seuils, versions, patterns)
-# Sourcé par debian13-server.sh
+# Sourcé par debian13-server.sh — Dépend de : rien (autonome)
+#
+# Toutes les valeurs sont readonly pour empêcher un écrasement accidentel.
+# Les chemins système, seuils numériques, patterns de détection et schedules
+# cron sont centralisés ici pour faciliter l'audit et l'ajustement.
+#
+# Convention de nommage :
+#   - _DAYS, _KB, _MB     = unités dans le nom pour lever l'ambiguïté
+#   - CRON_*               = expressions crontab (5 champs)
+#   - *_DIR, *_LOG, *_FILE = chemins absolus
+#
+# Pour surcharger en test : sourcez constants.sh AVANT de redéfinir.
+# Le readonly empêche la redéfinition dans le même shell, mais les tests
+# bats utilisent des variables séparées (override_paths dans test_helper.sh).
 
 # Espace disque & versions
 readonly MIN_DISK_KB=2097152          # 2 Go minimum d'espace libre
@@ -44,12 +57,18 @@ readonly OPENDKIM_PORT=8891
 readonly PMA_ALIAS_HEX_LENGTH=4
 readonly PMA_COOKIE_VALIDITY=1800             # 30 minutes
 
-# GeoIP — listes de pays (Afrique 54 + Asie 49 = 103)
+# GeoIP — listes de pays bloqués au niveau Apache (mod_geoip2).
+# L'idée : un serveur européen n'a souvent aucun trafic légitime depuis
+# ces zones ; les bloquer réduit drastiquement le bruit dans les logs.
+# Format : codes ISO 3166-1 alpha-2, séparés par espaces.
+# Afrique 54 + Asie 49 = 103 pays
 readonly GEOIP_COUNTRIES_AFRICA="dz ao bj bw bf bi cv cm cf td km cg cd ci dj eg gq er sz et ga gm gh gn gw ke ls lr ly mg mw ml mr mu ma mz na ne ng rw st sn sc sl so za ss sd tz tg tn ug zm zw"
 readonly GEOIP_COUNTRIES_ASIA="af am az bh bd bt bn kh cn ge in id ir iq il jo kz kw kg la lb my mv mn mm np kp om pk ps ph qa ru sa sg kr lk sy tw tj th tl tr tm ae uz vn ye"
 readonly GEOIP_COUNTRY_COUNT=103
 
-# SSH hardening — algorithmes
+# SSH hardening — sélection d'algorithmes post-quantiques et modernes.
+# On préfère chacha20 (rapide sur CPU sans AES-NI) et sntrup761 (résistant
+# quantique). Ces listes sont injectées dans sshd_config.
 readonly SSH_CIPHERS="chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr"
 readonly SSH_MACS="hmac-sha2-512-etm@openssh.com,hmac-sha2-256-etm@openssh.com"
 readonly SSH_KEX="sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve25519-sha256@libssh.org"
@@ -57,7 +76,9 @@ readonly SSH_KEX="sntrup761x25519-sha512@openssh.com,curve25519-sha256,curve2551
 # PHP — fonctions dangereuses à désactiver
 readonly PHP_DISABLED_FUNCTIONS="exec,passthru,shell_exec,system,proc_open,popen,curl_exec,curl_multi_exec,parse_ini_file,show_source"
 
-# Patterns de détection (sécurité web)
+# Patterns de détection (sécurité web) — regex POSIX étendue.
+# Utilisés par block_hack.sh pour identifier les scans automatisés
+# (WordPress inexistant, tentatives de traversal, injection SQL, etc.).
 readonly SUSPICIOUS_URL_PATTERNS='(wp-login|wp-admin|wp-content|wp-includes|xmlrpc\.php|\.env|\.git|phpinfo|phpmyadmin|pma|adminer|\.sql|\.bak|\.zip|\.tar|\.rar|shell|eval\(|base64|union.*select|concat\(|etc/passwd|\.\.\/|%2e%2e|<script|\.asp|\.aspx|cgi-bin|\.cgi)'
 readonly BAD_BOT_AGENTS='(nikto|sqlmap|nmap|masscan|zgrab|census|shodan|curl/|wget/|python-requests|go-http|libwww|scanner|exploit|vulnerability|attack)'
 
@@ -80,7 +101,9 @@ readonly WEB_USER="www-data"
 readonly ERROR_THROTTLE_SECONDS=300
 readonly THREE_JS_VERSION="r175"
 
-# Multi-domaines
+# Multi-domaines — constantes pour lib/domain-manager.sh.
+# DOMAINS_CONF est le registre central (format texte : "domaine:sélecteur").
+# CAA_ISSUER restreint l'émission de certificats à Let's Encrypt (RFC 8659).
 readonly DOMAINS_CONF="${SCRIPTS_DIR}/domains.conf"
 readonly DKIM_KEYDIR_BASE="/etc/opendkim/keys"
 readonly LOGROTATE_KEEP_DAYS=14

@@ -1,8 +1,21 @@
 #!/usr/bin/env bash
 # lib/tui.sh — Abstraction TUI (whiptail/dialog avec fallback texte)
 # Sourcé par debian13-server.sh
+#
+# Couche d'abstraction pour les interfaces texte interactives.
+# Cascade de priorité : whiptail (installé par défaut sur Debian) → dialog → texte pur.
+# Chaque fonction a le même comportement quel que soit le backend :
+#   - Retourne le choix de l'utilisateur sur stdout
+#   - Affiche l'interface sur stderr (convention ncurses)
+#   - Code retour 0 = OK, 1 = annulation
+#
+# Le fallback texte pur garantit le fonctionnement même dans un conteneur
+# Docker sans terminal ncurses ou via SSH sans allocation de PTY.
+#
+# Astuce file descriptors : whiptail/dialog écrivent leur résultat sur stderr.
+# Le swap "3>&1 1>&2 2>&3" redirige stderr→stdout pour capturer le résultat
+# dans une variable tout en affichant l'interface sur le terminal.
 
-# Détection automatique du backend
 : "${TUI_BACKEND:=$(command -v whiptail >/dev/null 2>&1 && echo whiptail || (command -v dialog >/dev/null 2>&1 && echo dialog || echo none))}"
 TUI_HEIGHT=12
 TUI_WIDTH=70

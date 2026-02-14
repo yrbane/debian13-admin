@@ -1,8 +1,26 @@
 #!/usr/bin/env bash
-# lib/helpers.sh — Fichiers temporaires, utilitaires système, fonctions d'aide
+# lib/helpers.sh — Utilitaires transversaux et fonctionnalités opérationnelles
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh
+#
+# Ce fichier est le « couteau suisse » du projet. Il regroupe :
+#
+#   1. Infrastructure bas-niveau   (tmpfiles, backup, apt wrappers)
+#   2. Vérifications système       (emit_check, permissions, freshness)
+#   3. Sécurité                    (AppArmor, auditd, egress, Fail2ban, WAF, mTLS)
+#   4. Opérations                  (monitoring, snapshots, dashboard, backup distant)
+#   5. Notifications               (Slack, Telegram, Discord)
+#   6. Observabilité               (structured logging, HTML report)
+#
+# Principe de conception : chaque fonction est autonome (pas d'état partagé
+# implicite entre fonctions) et tous les chemins sont injectables via
+# variables d'environnement pour faciliter les tests unitaires.
+#
+# Le fichier est organisé par blocs thématiques séparés par des bandeaux
+# commentés. Chaque bloc peut être lu indépendamment.
 
 # ---------------------------------- Fichiers temporaires & cleanup -------------------
+# Registre global des fichiers temporaires créés pendant l'exécution.
+# Le trap EXIT garantit le nettoyage même en cas d'erreur.
 declare -a _TMPFILES=()
 
 mktempfile() {
@@ -20,12 +38,17 @@ cleanup_tmpfiles() {
   done
   return 0
 }
-# ERR : signaler l'erreur (ne se declenche PAS sur exit normal)
+# Deux traps séparés par intention :
+# - ERR : notification (ne stoppe rien grâce à set -E qui propage le trap)
+# - EXIT : nettoyage garanti (s'exécute même sur exit 0, Ctrl-C ou erreur)
+# Ne pas combiner les deux dans un seul trap — le trap EXIT ne connaît pas
+# $LINENO du point d'erreur, et le trap ERR ne s'exécute pas sur exit normal.
 trap 'err "Erreur a la ligne $LINENO. Consulte le journal si necessaire."' ERR
-# EXIT : nettoyage silencieux (se declenche toujours, y compris exit 0)
 trap 'cleanup_tmpfiles' EXIT
 
 # ---------------------------------- Prérequis -----------------------------------------
+# Vérifications exécutées AVANT toute modification du système.
+# Principe : échouer tôt avec un message clair plutôt que planter à mi-parcours.
 require_root() { [[ $EUID -eq 0 ]] || die "Exécute ce script en root (sudo)."; }
 
 preflight_checks() {
@@ -63,6 +86,11 @@ preflight_checks() {
 }
 
 # ---------------------------------- Utilitaires ---------------------------------------
+# Fonctions réutilisables par toutes les bibliothèques d'installation.
+# Nommage : verbe_objet() pour les actions, check_*() pour les vérifications.
+
+# Sauvegarde horodatée d'un fichier avant modification (pattern .bak).
+# Appelée systématiquement avant tout sed/cp sur un fichier de config système.
 backup_file() {
   local f="$1"
   if [[ -f "$f" ]]; then
@@ -101,6 +129,8 @@ get_user_home() {
   fi
 }
 
+# Wrapper apt avec retry automatique : un premier échec relance apt-get update
+# puis réessaie. Couvre le cas classique d'un cache APT périmé sur une fresh install.
 apt_install() {
   local retries=2 attempt=1
   while (( attempt <= retries )); do
@@ -122,6 +152,9 @@ apt_update_upgrade() {
   apt_install apt-transport-https ca-certificates gnupg lsb-release
 }
 
+# Ajout idempotent d'une entrée crontab. Le pattern sert de clé unique :
+# on supprime toute ligne matchant le pattern avant d'ajouter la nouvelle.
+# Permet de relancer le script sans dupliquer les crons.
 add_cron_job() {
   local pattern="$1" line="$2" comment="${3:-}"
   local current new
@@ -144,6 +177,9 @@ set_cron_mailto() {
   echo -e "MAILTO=${email}\n${clean}" | grep -v '^$' | crontab -
 }
 
+# Déployer un script cron à partir d'un template : écriture + substitution
+# de placeholders + chmod +x + enregistrement crontab en un seul appel.
+# Les paires de substitution supplémentaires sont passées en arguments variadiques.
 deploy_script() {
   local path="$1" content="$2" cron_schedule="${3:-}" cron_comment="${4:-}"
   shift 4 2>/dev/null || true
@@ -178,6 +214,9 @@ check_service_active() {
   fi
 }
 
+# Vérifier la fraîcheur d'une base de données (ClamAV, rkhunter, AIDE).
+# Trois paliers : fresh (OK), stale (warn), obsolète (fail).
+# Fonctionne avec un fichier ou un répertoire (prend le fichier le plus récent).
 check_db_freshness() {
   local target="$1" label="$2" fresh="${3:-$DB_FRESH_DAYS}" stale="${4:-$DB_STALE_DAYS}"
   local db_epoch age_days
@@ -273,10 +312,16 @@ threshold_color() {
   fi
 }
 
-# ---------------------------------- AppArmor profiles --------------------------------
+# ================================== SÉCURITÉ =========================================
+# Bloc regroupant : AppArmor, auditd, egress filtering, Fail2ban, WAF, mTLS.
+# Chaque fonction est indépendante et peut être appelée individuellement
+# (via --domain-add ou lors de l'installation initiale).
 
-# Déployer les profils AppArmor locaux pour Apache, MariaDB et Postfix
-# Utilise APPARMOR_LOCAL (overridable pour les tests)
+# ---------------------------------- AppArmor profiles --------------------------------
+# AppArmor confine chaque démon dans un profil restrictif. Les fichiers dans
+# /etc/apparmor.d/local/ étendent les profils stock sans les écraser, ce qui
+# survit aux mises à jour de paquets. On autorise uniquement les chemins
+# nécessaires (DocumentRoot, logs, TLS, sockets).
 deploy_apparmor_profiles() {
   local local_dir="${APPARMOR_LOCAL:-/etc/apparmor.d/local}"
   mkdir -p "$local_dir"
@@ -315,9 +360,10 @@ EOF
 }
 
 # ---------------------------------- auditd rules ------------------------------------
-
-# Déployer les règles auditd pour le hardening serveur
-# Utilise AUDIT_RULES_DIR (overridable pour les tests)
+# auditd trace les accès aux fichiers sensibles (passwd, shadow, sudoers, ssh)
+# et les exécutions privilégiées. Les règles sont dans un fichier numéroté 99-
+# pour être chargées en dernier (priorité maximale).
+# Le filtre auid>=1000 cible les humains (UID système < 1000 exclus).
 deploy_auditd_rules() {
   local rules_dir="${AUDIT_RULES_DIR:-/etc/audit/rules.d}"
   mkdir -p "$rules_dir"
@@ -356,8 +402,9 @@ EOF
 }
 
 # ---------------------------------- Egress filtering ---------------------------------
-
-# Configurer le filtrage sortant UFW (deny par défaut + whitelist)
+# Par défaut, UFW ne filtre que l'entrant. Activer le deny outgoing + whitelist
+# empêche un processus compromis de contacter un C2 ou d'exfiltrer des données.
+# Seuls les ports strictement nécessaires sont ouverts en sortie.
 deploy_egress_rules() {
   ufw default deny outgoing
 
@@ -379,9 +426,11 @@ deploy_egress_rules() {
 }
 
 # ---------------------------------- Fail2ban extended --------------------------------
-
-# Déployer filtres et jails Fail2ban avancés
-# Utilise FAIL2BAN_FILTER_DIR et FAIL2BAN_JAIL_DIR (overridable pour les tests)
+# Au-delà du jail SSH par défaut, on ajoute :
+#   - apache-post-flood : brute-force de formulaires (30 POST/min → ban 10min)
+#   - apache-auth-flood : credential stuffing (10 x 401/403 en 2min → ban 30min)
+#   - recidive : ban longue durée (7j) pour les IP déjà bannies 3 fois en 24h
+# Le jail recidive lit le propre log de Fail2ban (boucle de rétroaction).
 deploy_fail2ban_extended() {
   local filter_dir="${FAIL2BAN_FILTER_DIR:-/etc/fail2ban/filter.d}"
   local jail_dir="${FAIL2BAN_JAIL_DIR:-/etc/fail2ban/jail.d}"
@@ -434,11 +483,13 @@ EOF
 }
 
 # ---------------------------------- WAF rules per domain ------------------------------
+# Règles ModSecurity par domaine : permet de différencier les seuils de
+# rate-limiting et les whitelists IP selon le domaine hébergé.
+# Les règles sont dans des fichiers séparés inclus par la config ModSecurity
+# principale (IncludeOptional /etc/modsecurity/rules.d/*.conf).
 
 : "${WAF_RULES_DIR:=/etc/modsecurity/rules.d}"
 
-# Déployer des règles ModSecurity spécifiques à un domaine
-# $1 = domain, $2 = IP whitelist (optionnel), $3 = rate limit (optionnel)
 deploy_waf_domain_rules() {
   local domain="$1" whitelist_ip="${2:-}" rate_limit="${3:-}"
   mkdir -p "$WAF_RULES_DIR"
@@ -474,10 +525,19 @@ remove_waf_domain_rules() {
 }
 
 # ---------------------------------- mTLS client certificates --------------------------
+# mTLS (mutual TLS) ajoute l'authentification client par certificat.
+# Workflow : on crée une CA interne auto-signée, on génère des certificats
+# clients signés par cette CA, et Apache vérifie le certificat client
+# (SSLVerifyClient require) lors de la connexion.
+# Usage typique : accès admin, API internes, VPN applicatif.
+#
+# Structure :
+#   $MTLS_CA_DIR/ca.pem          Certificat racine CA
+#   $MTLS_CA_DIR/ca-key.pem      Clé privée CA (à protéger !)
+#   $MTLS_CA_DIR/clients/*.pem   Certificats clients signés
 
 : "${MTLS_CA_DIR:=/etc/ssl/mtls-ca}"
 
-# Initialiser une CA interne pour mTLS
 mtls_init_ca() {
   mkdir -p "$MTLS_CA_DIR"
   if [[ -f "${MTLS_CA_DIR}/ca.pem" && -f "${MTLS_CA_DIR}/ca-key.pem" ]]; then
@@ -544,12 +604,17 @@ MTLS
   log "mTLS: VHost déployé pour ${domain}"
 }
 
+# ================================== OPÉRATIONS ========================================
+# Bloc regroupant : backup distant, monitoring, snapshots, dashboard, health.
+
 # ---------------------------------- Backup distant ------------------------------------
+# Stratégie de backup 3-2-1 : un backup local (lib/backup.sh) + un backup
+# distant chiffré (GPG) envoyé par rsync over SSH.
+# La config est stockée dans un fichier .conf séparé pour ne pas mélanger
+# les credentials de backup avec la config du serveur.
 
 : "${BACKUP_REMOTE_CONF:=/etc/debian13-backup-remote.conf}"
 
-# Configurer les paramètres de backup distant
-# $1 = host, $2 = path, $3 = port (optionnel)
 backup_remote_config() {
   local host="$1" path="$2" port="${3:-22}"
   {
@@ -584,10 +649,13 @@ backup_remote_rsync() {
 }
 
 # ---------------------------------- Monitoring & alertes proactives --------------------
+# Checks légers exécutables par cron toutes les 5 minutes.
+# Chaque check retourne 0 (OK) ou 1 (alerte) — monitor_run_all() agrège
+# les résultats et envoie une notification si un problème est détecté.
+# La liste des services surveillés est configurable via MONITOR_SERVICES.
 
 MONITOR_SERVICES="${MONITOR_SERVICES:-apache2 postfix fail2ban ufw mariadb}"
 
-# Vérifier que les services critiques tournent
 monitor_check_services() {
   local failed=0
   for svc in $MONITOR_SERVICES; do
@@ -686,11 +754,16 @@ MONITOR
 }
 
 # ---------------------------------- Snapshots & Rollback -------------------------------
+# Snapshot léger : on copie uniquement les fichiers de configuration
+# (domains.conf, VHosts Apache, logrotate, per-domain configs).
+# Pas de snapshot des données web ni des bases — pour ça, utiliser
+# le backup complet (lib/backup.sh) ou les snapshots OVH.
+#
+# Un snapshot est créé automatiquement avant --domain-add et --domain-remove
+# dans debian13-server.sh, pour permettre un rollback rapide en cas de problème.
 
 : "${SNAPSHOT_DIR:=/var/lib/debian13-snapshots}"
 
-# Créer un snapshot de l'état actuel
-# $1 = label (ex: "before-domain-add")
 snapshot_create() {
   local label="$1"
   local ts
@@ -789,9 +862,13 @@ HEALTHZ
 }
 
 # ---------------------------------- Dashboard temps réel -------------------------------
+# Dashboard HTML statique avec appel AJAX vers un CGI bash qui retourne
+# du JSON (métriques système, services, SSL, Fail2ban).
+# Sécurité : URL secrète (hash MD5 du domaine) + restriction IP via .htaccess.
+# Refresh automatique toutes les 10 secondes sans rechargement de page.
+# Aucune dépendance externe (pas de Node/Python/PHP) — fonctionne avec
+# le CGI handler natif d'Apache.
 
-# Déployer un dashboard de monitoring accessible via URL secrète
-# $1 = domain
 deploy_dashboard() {
   local domain="$1"
   local secret="${DASHBOARD_SECRET:-$(echo "${domain}dashboard" | md5sum | cut -d' ' -f1)}"
@@ -975,9 +1052,12 @@ DASHHTML
   log "Dashboard déployé : https://${domain}/dashboard-${secret}/"
 }
 
-# ---------------------------------- Dry-run mode (Point 23) ---------------------------
+# ================================== MODES D'EXÉCUTION =================================
 
-# Wrapper : exécute la commande sauf si DRY_RUN=true
+# ---------------------------------- Dry-run mode --------------------------------------
+# Enrober les commandes destructives avec dry_run_wrap() pour simuler
+# l'exécution sans modifier le système. Activé par --dry-run.
+# Usage : dry_run_wrap apt-get install -y nginx
 dry_run_wrap() {
   if [[ "${DRY_RUN:-false}" == "true" ]]; then
     echo "[DRY-RUN] $*"
@@ -986,9 +1066,13 @@ dry_run_wrap() {
   "$@"
 }
 
-# ---------------------------------- Notifications multi-canal (Point 24) --------------
+# ---------------------------------- Notifications multi-canal -------------------------
+# Chaque canal est optionnel : si la variable webhook/token n'est pas définie,
+# la fonction retourne silencieusement 0 (pas d'erreur).
+# notify_all() dispatche vers tous les canaux configurés en un seul appel.
+# Les erreurs réseau sont avalées (|| true) — une notification ratée ne
+# doit jamais bloquer le déroulement du script principal.
 
-# Envoyer une notification Slack
 notify_slack() {
   local message="$1"
   [[ -n "${SLACK_WEBHOOK:-}" ]] || return 0
@@ -1024,10 +1108,16 @@ notify_all() {
   notify_discord "$message"
 }
 
-# ---------------------------------- Structured logging ---------------------------------
+# ================================== OBSERVABILITÉ =====================================
 
-# slog level message [key=value ...]
-# Writes a JSON log line to $STRUCTURED_LOG
+# ---------------------------------- Structured logging --------------------------------
+# Logs JSON (une ligne = un objet) vers $STRUCTURED_LOG pour ingestion par
+# des outils comme jq, Loki, Elasticsearch. Complémentaire aux logs console
+# (core.sh) qui sont pour l'humain. Format NDJSON (newline-delimited JSON).
+# Activé uniquement si STRUCTURED_LOG est défini (chemin du fichier de sortie).
+#
+# Usage : slog "info" "Domaine ajouté" "domain=example.com" "selector=mail"
+# Produit : {"ts":"...","level":"info","msg":"Domaine ajouté","domain":"example.com","selector":"mail"}
 slog() {
   [[ -n "${STRUCTURED_LOG:-}" ]] || return 0
   local level="$1" msg="$2"; shift 2
@@ -1048,10 +1138,13 @@ slog() {
   printf '{"ts":"%s","level":"%s","msg":"%s"%s}\n' "$ts" "$level" "$msg" "$extra" >> "$STRUCTURED_LOG"
 }
 
-# ---------------------------------- HTML audit report ----------------------------------
+# ---------------------------------- HTML audit report ---------------------------------
+# Rapport HTML généré pendant la phase de vérification (--audit).
+# Chaque emit_check() du système de vérification (lib/verify.sh) appelle
+# aussi html_report_check() pour alimenter le rapport en parallèle.
+# Le rapport est auto-contenu (CSS inline, pas de dépendance externe).
+# Activé uniquement si HTML_REPORT est défini (chemin du fichier de sortie).
 
-# Start HTML report
-# $1 = title
 html_report_start() {
   [[ -n "${HTML_REPORT:-}" ]] || return 0
   local title="$1"

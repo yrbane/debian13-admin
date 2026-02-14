@@ -1,14 +1,33 @@
 #!/usr/bin/env bash
-# lib/clone.sh — Clone server to a target machine
+# lib/clone.sh — Clonage de serveur vers une machine cible
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/helpers.sh
+#
+# Permet de dupliquer la configuration complète d'un serveur vers un autre.
+# Workflow en deux étapes :
+#   1. --clone-keygen  : génère une paire de clés SSH ed25519 dédiée au clonage
+#   2. --clone <ip>    : synchronise toutes les configs via rsync over SSH
+#
+# Ce qui est synchronisé :
+#   - Scripts et configuration (/root/scripts, domains.conf, domains.d/)
+#   - Clés DKIM et tables OpenDKIM
+#   - VHosts Apache et logrotate
+#   - Fichiers web (/var/www/*)
+#   - Certificats Let's Encrypt
+#
+# Ce qui n'est PAS synchronisé (volontairement) :
+#   - Bases MariaDB (utiliser mysqldump + restore séparément)
+#   - Hostname/IP (à reconfigurer sur la cible)
+#   - Clés SSH du serveur (/etc/ssh/ssh_host_*)
+#
+# Sécurité : la clé de clonage est distincte des clés SSH utilisateur pour
+# pouvoir la révoquer indépendamment. StrictHostKeyChecking=no est utilisé
+# car la cible est souvent une fresh install sans known_hosts préexistant.
 
-# Chemins (overridable pour les tests)
 : "${CLONE_KEY_DIR:=/root/.ssh}"
 : "${CLONE_SSH_KEY:=${CLONE_KEY_DIR}/clone_rsa}"
 : "${SCRIPTS_DIR:=/root/scripts}"
 : "${DKIM_KEYDIR:=/etc/opendkim/keys}"
 
-# Generate an SSH key pair for cloning
 clone_generate_key() {
   mkdir -p "$CLONE_KEY_DIR"
   if [[ -f "$CLONE_SSH_KEY" && -f "${CLONE_SSH_KEY}.pub" ]]; then
