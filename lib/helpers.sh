@@ -14,11 +14,16 @@ mktempfile() {
 }
 
 cleanup_tmpfiles() {
-  for f in "${_TMPFILES[@]:-}"; do
+  local f
+  for f in "${_TMPFILES[@]+"${_TMPFILES[@]}"}"; do
     [[ -f "$f" ]] && rm -f "$f"
   done
+  return 0
 }
-trap 'cleanup_tmpfiles; err "Erreur à la ligne $LINENO. Consulte le journal si nécessaire."' ERR EXIT
+# ERR : signaler l'erreur (ne se declenche PAS sur exit normal)
+trap 'err "Erreur a la ligne $LINENO. Consulte le journal si necessaire."' ERR
+# EXIT : nettoyage silencieux (se declenche toujours, y compris exit 0)
+trap 'cleanup_tmpfiles' EXIT
 
 # ---------------------------------- Prérequis -----------------------------------------
 require_root() { [[ $EUID -eq 0 ]] || die "Exécute ce script en root (sudo)."; }
