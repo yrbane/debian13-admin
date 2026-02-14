@@ -433,6 +433,108 @@ EOF
   log "Fail2ban: filtres et jails étendus déployés"
 }
 
+# ---------------------------------- Monitoring & alertes proactives --------------------
+
+MONITOR_SERVICES="${MONITOR_SERVICES:-apache2 postfix fail2ban ufw mariadb}"
+
+# Vérifier que les services critiques tournent
+monitor_check_services() {
+  local failed=0
+  for svc in $MONITOR_SERVICES; do
+    local status
+    status=$(systemctl is-active "$svc" 2>/dev/null || echo "inactive")
+    if [[ "$status" != "active" ]]; then
+      warn "Service arrêté : ${svc}"
+      failed=1
+    fi
+  done
+  return $failed
+}
+
+# Vérifier l'espace disque
+# $1 = seuil en % (défaut: 85)
+monitor_check_disk() {
+  local threshold="${1:-85}"
+  local usage
+  usage=$(df / 2>/dev/null | awk 'NR==2{print $5}' | tr -d '%')
+  if [[ "$usage" -ge "$threshold" ]]; then
+    warn "Disque utilisé à ${usage}% (seuil: ${threshold}%)"
+    return 1
+  fi
+  return 0
+}
+
+# Vérifier l'expiration SSL
+# $1 = jours minimum (défaut: 14)
+monitor_check_ssl() {
+  local min_days="${1:-14}"
+  local le_dir="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+  local alerts=0
+  for cert_dir in "${le_dir}"/live/*/; do
+    [[ -d "$cert_dir" ]] || continue
+    local cert="${cert_dir}fullchain.pem"
+    [[ -f "$cert" ]] || continue
+    local domain
+    domain=$(basename "$cert_dir")
+    local exp
+    exp=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | cut -d= -f2)
+    [[ -z "$exp" ]] && continue
+    local exp_epoch now_epoch days_left
+    exp_epoch=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+    now_epoch=$(date +%s)
+    days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+    if [[ "$days_left" -lt "$min_days" ]]; then
+      warn "SSL ${domain} expire dans ${days_left} jours"
+      alerts=1
+    fi
+  done
+  return $alerts
+}
+
+# Vérifier la file Postfix
+# $1 = seuil nombre de messages (défaut: 50)
+monitor_check_postfix() {
+  local threshold="${1:-50}"
+  local queue_size
+  queue_size=$(mailq 2>/dev/null | grep -oP '\d+ Request' | grep -oP '^\d+' || echo 0)
+  [[ -z "$queue_size" ]] && queue_size=0
+  if [[ "$queue_size" -ge "$threshold" ]]; then
+    warn "File Postfix : ${queue_size} messages (seuil: ${threshold})"
+    return 1
+  fi
+  return 0
+}
+
+# Exécuter tous les checks de monitoring
+monitor_run_all() {
+  local issues=0
+  monitor_check_services || { notify_all "ALERTE ${HOSTNAME_FQDN}: service(s) arrêté(s)"; ((issues++)); }
+  monitor_check_disk    || { notify_all "ALERTE ${HOSTNAME_FQDN}: disque plein (>85%)"; ((issues++)); }
+  monitor_check_ssl     || { notify_all "ALERTE ${HOSTNAME_FQDN}: certificat SSL expire bientôt"; ((issues++)); }
+  monitor_check_postfix || { notify_all "ALERTE ${HOSTNAME_FQDN}: file Postfix saturée"; ((issues++)); }
+  if [[ "$issues" -eq 0 ]]; then
+    echo "Monitoring: ${issues} checks OK"
+  else
+    echo "Monitoring: ${issues} alertes détectées"
+  fi
+  return 0
+}
+
+# Déployer le script cron de monitoring
+deploy_monitor_cron() {
+  local script="${MONITOR_SCRIPT:-/usr/local/bin/server-monitor.sh}"
+  cat > "$script" <<MONITOR
+#!/bin/bash
+# Monitoring proactif — généré par debian13-server.sh
+source "${SCRIPTS_DIR:-/root/scripts}/lib/core.sh"
+source "${SCRIPTS_DIR:-/root/scripts}/lib/helpers.sh"
+HOSTNAME_FQDN="${HOSTNAME_FQDN:-\$(hostname -f)}"
+monitor_run_all
+MONITOR
+  chmod +x "$script"
+  log "Script de monitoring déployé : ${script}"
+}
+
 # ---------------------------------- Snapshots & Rollback -------------------------------
 
 : "${SNAPSHOT_DIR:=/var/lib/debian13-snapshots}"
