@@ -175,6 +175,55 @@
         .feature-card.system { border-top: 3px solid var(--green); }
         .feature-card.email { border-top: 3px solid var(--purple); }
 
+        /* ---- DETAIL SECTION ---- */
+        .detail-section { background: var(--bg-alt); }
+        .detail-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(460px, 1fr));
+            gap: 18px;
+        }
+        .detail-card {
+            background: rgba(20, 33, 54, 0.5);
+            backdrop-filter: blur(8px);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px 26px;
+            transition: all 0.3s ease;
+        }
+        .detail-card:hover {
+            border-color: rgba(107, 219, 219, 0.15);
+            box-shadow: 0 8px 30px rgba(0,0,0,0.2);
+        }
+        .detail-card .dh {
+            display: flex; align-items: center; gap: 14px;
+            margin-bottom: 18px; padding-bottom: 14px;
+            border-bottom: 1px solid var(--border);
+        }
+        .detail-card .dh-icon {
+            width: 42px; height: 42px; border-radius: 10px;
+            display: flex; align-items: center; justify-content: center;
+            font-size: 19px; flex-shrink: 0;
+        }
+        .detail-card .dh h3 { font-size: 16px; font-weight: 700; line-height: 1.2; }
+        .detail-card .dh-sub {
+            font-size: 11px; color: var(--text-muted); text-transform: uppercase;
+            letter-spacing: 0.06em; margin-top: 2px;
+        }
+        .detail-card ul { list-style: none; }
+        .detail-card li {
+            padding: 4px 0; font-size: 13.5px; color: var(--text-dim);
+            display: flex; align-items: baseline; gap: 8px; line-height: 1.5;
+        }
+        .detail-card li::before { content: '\25B8'; color: var(--cyan); font-size: 10px; flex-shrink: 0; }
+        .detail-card li strong { color: var(--text); white-space: nowrap; }
+        .detail-card li code {
+            font-family: var(--mono); font-size: 12px; color: var(--cyan);
+            background: rgba(107, 219, 219, 0.08); padding: 1px 5px; border-radius: 3px;
+        }
+        @media (max-width: 768px) {
+            .detail-grid { grid-template-columns: 1fr; }
+        }
+
         /* ---- PIPELINE ---- */
         .domains-section { background: var(--bg-alt); }
         .pipeline-wrap { overflow-x: auto; padding: 20px 0; }
@@ -346,6 +395,7 @@
         <a href="#" class="logo">&#x1f6e1;&#xfe0f; debian13<span>-server</span></a>
         <div class="links">
             <a href="#features">Stack</a>
+            <a href="#detail">Detail</a>
             <a href="#domains">Domaines</a>
             <a href="#architecture">Architecture</a>
             <a href="#operations">Operations</a>
@@ -438,6 +488,150 @@
                     <li><strong>Alertes</strong> Slack, Telegram, Discord</li>
                 </ul>
             </div>
+        </div>
+    </div>
+</section>
+
+<!-- SOUS LE CAPOT -->
+<section id="detail" class="detail-section">
+    <div class="container">
+        <h2 class="reveal">Sous le capot</h2>
+        <p class="section-desc reveal">16 phases d'installation orchestrees. Chaque composant est configure, durci et verifie.</p>
+
+        <div class="detail-grid">
+
+            <!-- 1. Reseau & acces -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(239,68,68,0.15);color:var(--red)">&#x1f512;</div>
+                    <div><h3>Reseau &amp; acces</h3><div class="dh-sub">SSH &middot; UFW &middot; GeoIP &middot; Fail2ban</div></div>
+                </div>
+                <ul>
+                    <li><strong>SSH</strong> Port custom (def <code>65222</code>), cle uniquement, <code>PermitRootLogin=no</code>, 3 essais max</li>
+                    <li><strong>Post-quantique</strong> KEX <code>sntrup761x25519-sha512</code>, chiffrement <code>ChaCha20-Poly1305</code> + <code>AES-256-GCM</code></li>
+                    <li><strong>UFW</strong> Deny-all ingress + whitelist SSH/80/443 &mdash; filtrage egress optionnel (DNS, SMTP, NTP)</li>
+                    <li><strong>GeoIP</strong> 103 pays bloques via <code>ipset</code> kernel, MAJ hebdo atomique (zero downtime)</li>
+                    <li><strong>Fail2ban</strong> 9 jails : SSH, Apache-auth, badbots, vulnscan, badagent, post-flood, auth-flood, recidive 7j</li>
+                    <li><strong>Login alerts</strong> Email a chaque connexion SSH avec geolocalisation IP (ipinfo.io)</li>
+                </ul>
+            </div>
+
+            <!-- 2. Stack web -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(59,130,246,0.15);color:var(--blue)">&#x1f310;</div>
+                    <div><h3>Stack web</h3><div class="dh-sub">Apache &middot; PHP &middot; MariaDB &middot; phpMyAdmin</div></div>
+                </div>
+                <ul>
+                    <li><strong>Apache</strong> MPM event, mod_headers, mod_rewrite, mod_ssl, mod_deflate, mod_proxy + WebSocket</li>
+                    <li><strong>Headers</strong> HSTS 2 ans, CSP, X-Frame-Options, X-Content-Type-Options, Permissions-Policy, Referrer-Policy</li>
+                    <li><strong>PHP 8.x FPM</strong> opcache, <code>expose_php=Off</code>, 10 fonctions dangereuses desactivees (<code>exec</code>, <code>shell_exec</code>, <code>system</code>&hellip;)</li>
+                    <li><strong>MariaDB</strong> Hardening auto : anonymous users supprimes, test DB dropped, privileges flush</li>
+                    <li><strong>phpMyAdmin</strong> URL aleatoire <code>/dbadmin_&lt;hex&gt;</code>, cookie 30 min, AllowArbitraryServer=false, syslog</li>
+                    <li><strong>Erreurs</strong> Pages WebGL Three.js 3D, debug IP de confiance, alerte email 5xx (throttle 5 min)</li>
+                </ul>
+            </div>
+
+            <!-- 3. Certificats & DNS -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(34,197,94,0.15);color:var(--green)">&#x1f5a7;</div>
+                    <div><h3>Certificats &amp; DNS</h3><div class="dh-sub">Let's Encrypt &middot; OVH API &middot; HMAC-SHA1</div></div>
+                </div>
+                <ul>
+                    <li><strong>Let's Encrypt</strong> HTTP-01 standard ou <strong>DNS-01 wildcard</strong> <code>*.domain</code> via OVH API</li>
+                    <li><strong>OVH API</strong> Requetes signees HMAC-SHA1, CRUD records, refresh zone automatique</li>
+                    <li><strong>Records auto</strong> A, AAAA, www, SPF, DKIM, DMARC, CAA &mdash; crees/MAJ en une commande</li>
+                    <li><strong>Verification</strong> <code>--check-dns</code> resout chaque record, <code>--check-dns --fix</code> auto-corrige via API</li>
+                    <li><strong>Renouvellement</strong> Timer systemd automatique, relance Apache post-renewal</li>
+                    <li><strong>PTR / reverse</strong> Configuration automatique du reverse DNS IPv4/IPv6</li>
+                </ul>
+            </div>
+
+            <!-- 4. Email -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(168,85,247,0.15);color:var(--purple)">&#x1f4e7;</div>
+                    <div><h3>Email sortant</h3><div class="dh-sub">Postfix &middot; OpenDKIM &middot; SPF &middot; DMARC</div></div>
+                </div>
+                <ul>
+                    <li><strong>Postfix</strong> Send-only, <code>inet_interfaces=loopback-only</code>, TLS opportuniste, pas de relay</li>
+                    <li><strong>OpenDKIM</strong> Multi-domaines : cle RSA 2048 bits par domaine, selecteur configurable</li>
+                    <li><strong>SPF</strong> <code>v=spf1 a mx ip4:{IP} include:mx.ovh.com ~all</code></li>
+                    <li><strong>DMARC</strong> <code>p=quarantine</code>, rapports a l'admin, alignement SPF+DKIM</li>
+                    <li><strong>Rotation</strong> <code>--dkim-rotate</code> cree un selecteur horodate <code>mail{YYYYMMDD}</code>, conserve l'ancien</li>
+                    <li><strong>DANE/TLSA</strong> Hash du certificat TLS publie dans le DNS pour validation</li>
+                </ul>
+            </div>
+
+            <!-- 5. Securite systeme -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(245,158,11,0.15);color:var(--amber)">&#x1f6e1;&#xfe0f;</div>
+                    <div><h3>Securite systeme</h3><div class="dh-sub">WAF &middot; AppArmor &middot; auditd &middot; sysctl</div></div>
+                </div>
+                <ul>
+                    <li><strong>ModSecurity</strong> WAF OWASP CRS : SQLi, XSS, LFI, RCE, scanners &mdash; mode DetectionOnly ou blocage</li>
+                    <li><strong>AppArmor</strong> Profils MAC pour Apache, MariaDB, Postfix (confinement fichiers/reseau)</li>
+                    <li><strong>auditd</strong> Syscalls sensibles : identite, privileges, cron, reseau, systemd &mdash; filtre <code>auid>=1000</code></li>
+                    <li><strong>sysctl</strong> ASLR, SYN cookies, <code>kptr_restrict</code>, IP forwarding off, Magic SysRq off</li>
+                    <li><strong>/tmp</strong> Monte <code>noexec,nosuid,nodev</code> (tmpfs 1 Go) &mdash; bloque payload staging</li>
+                    <li><strong>sudo</strong> Timeout 5 min, log complet <code>/var/log/sudo.log</code></li>
+                </ul>
+            </div>
+
+            <!-- 6. Detection & antivirus -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(220,92,59,0.15);color:var(--accent)">&#x1f50d;</div>
+                    <div><h3>Detection &amp; antivirus</h3><div class="dh-sub">ClamAV &middot; rkhunter &middot; AIDE &middot; Logwatch</div></div>
+                </div>
+                <ul>
+                    <li><strong>ClamAV</strong> Scan quotidien 2h, MAJ signatures freshclam temps reel, alertes email</li>
+                    <li><strong>rkhunter</strong> Scan hebdo dimanche 3h, whitelist faux positifs Debian, MAJ post-apt</li>
+                    <li><strong>AIDE</strong> Baseline integrite fichiers, check quotidien 4h, exclusions intelligentes (/var/cache, /tmp&hellip;)</li>
+                    <li><strong>Logwatch</strong> Digest HTML quotidien par email (auth, apache, postfix, syslog)</li>
+                    <li><strong>block_hack.sh</strong> Analyse ModSec horaire : IP recurrentes &rarr; ban permanent UFW</li>
+                    <li><strong>WAF par domaine</strong> Rate-limiting et regles personnalisees dans <code>/etc/modsecurity/rules.d/</code></li>
+                </ul>
+            </div>
+
+            <!-- 7. Monitoring -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(107,219,219,0.15);color:var(--cyan)">&#x1f4ca;</div>
+                    <div><h3>Monitoring &amp; observabilite</h3><div class="dh-sub">Dashboard &middot; Alertes &middot; Healthz &middot; NDJSON</div></div>
+                </div>
+                <ul>
+                    <li><strong>Dashboard</strong> Temps reel HTML/JS pur, URL secrete + restriction IP, auto-refresh 10s</li>
+                    <li><strong>/healthz</strong> Endpoint JSON : uptime, load, CPU, disk, memoire, timestamp &mdash; LB-compatible</li>
+                    <li><strong>Alertes</strong> Multi-canal : Slack, Telegram, Discord via webhooks (disk >85%, SSL <14j, queue >50)</li>
+                    <li><strong>Logs structures</strong> NDJSON dans <code>/var/log/bootstrap_structured.jsonl</code> &mdash; pret pour Loki/ELK</li>
+                    <li><strong>Rapport audit</strong> HTML auto-contenu (<code>--audit-html</code>) : OK/WARN/FAIL par section</li>
+                    <li><strong>19 verifications</strong> Services, SSH, web, DNS, DKIM, TLS, ports, fichiers, ressources&hellip;</li>
+                </ul>
+            </div>
+
+            <!-- 8. DevOps & infra -->
+            <div class="detail-card reveal">
+                <div class="dh">
+                    <div class="dh-icon" style="background:rgba(20,184,166,0.15);color:var(--teal)">&#x2699;&#xfe0f;</div>
+                    <div><h3>DevOps &amp; infrastructure</h3><div class="dh-sub">Backup &middot; Clone &middot; Fleet &middot; Hooks</div></div>
+                </div>
+                <ul>
+                    <li><strong>DevTools</strong> Git, Node.js (nvm LTS), Rust (rustup), Python 3 (pipx PEP 668), Composer, Symfony CLI</li>
+                    <li><strong>Backup 3-2-1</strong> Configs + DKIM + MariaDB + crontab, remote GPG optionnel via rsync SSH</li>
+                    <li><strong>Snapshots</strong> Crees automatiquement avant chaque operation domaine, <code>--rollback</code> instantane</li>
+                    <li><strong>Clonage</strong> <code>--clone &lt;ip&gt;</code> : rsync SSH des scripts, DKIM, VHosts, certs, logrotate</li>
+                    <li><strong>Fleet</strong> Inventaire multi-serveurs (<code>fleet.conf</code>), exec distribue, sync config, status</li>
+                    <li><strong>Hooks</strong> Plugins <code>hooks.d/</code> : pre/post install, domain-add, domain-remove, backup</li>
+                </ul>
+            </div>
+
+        </div>
+
+        <div class="callout-important reveal" style="margin-top:40px;">
+            <strong>Idempotent</strong> &mdash; Le script peut etre relance a tout moment sans casser ce qui existe. Chaque action verifie l'etat avant d'agir.
         </div>
     </div>
 </section>
