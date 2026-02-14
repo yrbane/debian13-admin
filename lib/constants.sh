@@ -34,6 +34,11 @@ readonly CRON_BLOCK_HACK="0 * * * *"            # toutes les heures
 readonly CRON_UPDATES="0 7 * * 1"             # hebdo lundi 7h00
 readonly CRON_AUDIT="0 7 * * 1"               # hebdo lundi 7h00
 
+# DNS
+readonly DNS_RESOLVER="8.8.8.8"
+readonly DNS_TTL_DEFAULT=3600
+readonly SECONDS_PER_DAY=86400
+
 # Réseau
 readonly OPENDKIM_PORT=8891
 readonly PMA_ALIAS_HEX_LENGTH=4
@@ -78,6 +83,10 @@ readonly THREE_JS_VERSION="r175"
 # Multi-domaines
 readonly DOMAINS_CONF="${SCRIPTS_DIR}/domains.conf"
 readonly DKIM_KEYDIR_BASE="/etc/opendkim/keys"
+readonly LOGROTATE_KEEP_DAYS=14
+readonly CAA_ISSUER="letsencrypt.org"
+readonly SPF_INCLUDE_OVH="mx.ovh.com"
+readonly DMARC_POLICY="quarantine"
 
 # Couleurs HTML (charte Since & Co)
 readonly HTML_COLOR_DARK="#142136"

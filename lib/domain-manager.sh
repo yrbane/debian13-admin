@@ -244,7 +244,7 @@ dm_deploy_logrotate() {
 ${LOG_DIR}/${domain}/*.log {
     daily
     missingok
-    rotate 14
+    rotate ${LOGROTATE_KEEP_DAYS:-14}
     compress
     delaycompress
     notifempty
@@ -341,7 +341,7 @@ dm_setup_dns() {
   local caa_rid
   caa_rid=$(ovh_dns_find "$base_domain" "" "CAA" 2>/dev/null) || caa_rid=""
   if [[ -z "$caa_rid" ]]; then
-    ovh_dns_create "$base_domain" "" "CAA" "\"0 issue \\\"letsencrypt.org\\\"\"" 2>/dev/null && ((++DM_DNS_OK)) || ((++DM_DNS_FAIL))
+    ovh_dns_create "$base_domain" "" "CAA" "\"0 issue \\\"${CAA_ISSUER:-letsencrypt.org}\\\"\"" 2>/dev/null && ((++DM_DNS_OK)) || ((++DM_DNS_FAIL))
   fi
 
   # --- Refresh zone ---

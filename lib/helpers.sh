@@ -193,7 +193,7 @@ check_db_freshness() {
 
   [[ -z "$db_epoch" ]] && return 1
   db_epoch=${db_epoch%.*}
-  age_days=$(( ($(date +%s) - db_epoch) / 86400 ))
+  age_days=$(( ($(date +%s) - db_epoch) / ${SECONDS_PER_DAY:-86400} ))
 
   local status msg
   if (( age_days <= fresh )); then
@@ -245,11 +245,11 @@ safe_count() {
 
 days_since() {
   local epoch="${1:-0}"
-  echo $(( ($(date +%s) - epoch) / 86400 ))
+  echo $(( ($(date +%s) - epoch) / ${SECONDS_PER_DAY:-86400} ))
 }
 days_until() {
   local epoch="${1:-0}"
-  echo $(( (epoch - $(date +%s)) / 86400 ))
+  echo $(( (epoch - $(date +%s)) / ${SECONDS_PER_DAY:-86400} ))
 }
 
 add_line_if_missing() {

@@ -661,7 +661,7 @@ verify_dkim() {
     # Comparaison clé locale vs DNS
     if command -v dig >/dev/null 2>&1 && [[ -f "$dkim_pub" ]]; then
       local dns_key local_key
-      dns_key=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @8.8.8.8 2>/dev/null | tr -d '"\n ' | grep -oP 'p=\K[^;]+')
+      dns_key=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @${DNS_RESOLVER} 2>/dev/null | tr -d '"\n ' | grep -oP 'p=\K[^;]+')
       local_key=$(cat "$dkim_pub" 2>/dev/null | tr -d '"\n\t ()' | grep -oP 'p=\K[^;]+' | head -1)
 
       if [[ -z "$dns_key" ]]; then
@@ -746,7 +746,7 @@ verify_sysconfig() {
   fi
 
   # DNS résolution
-  if host -W 2 google.com >/dev/null 2>&1 || ping -c1 -W2 8.8.8.8 >/dev/null 2>&1; then
+  if host -W 2 google.com >/dev/null 2>&1 || ping -c1 -W2 ${DNS_RESOLVER} >/dev/null 2>&1; then
     emit_check ok "DNS/Réseau : fonctionnel"
   else
     emit_check warn "DNS/Réseau : problème de résolution"
@@ -1060,7 +1060,7 @@ verify_dns() {
 
   if command -v dig >/dev/null 2>&1; then
     # A record
-    DNS_A=$(dig +short +timeout="${DNS_TIMEOUT}" A "$HOSTNAME_FQDN" @8.8.8.8 2>/dev/null | head -1)
+    DNS_A=$(dig +short +timeout="${DNS_TIMEOUT}" A "$HOSTNAME_FQDN" @${DNS_RESOLVER} 2>/dev/null | head -1)
     if [[ -n "$DNS_A" ]]; then
       if [[ "$DNS_A" == "$SERVER_IP" ]]; then
         emit_check ok "DNS A : ${HOSTNAME_FQDN} → ${DNS_A} (correspond à ce serveur)"
@@ -1072,7 +1072,7 @@ verify_dns() {
     fi
 
     # www
-    DNS_WWW=$(dig +short +timeout="${DNS_TIMEOUT}" A "www.${HOSTNAME_FQDN}" @8.8.8.8 2>/dev/null | head -1)
+    DNS_WWW=$(dig +short +timeout="${DNS_TIMEOUT}" A "www.${HOSTNAME_FQDN}" @${DNS_RESOLVER} 2>/dev/null | head -1)
     if [[ -n "$DNS_WWW" ]]; then
       if [[ "$DNS_WWW" == "$SERVER_IP" || "$DNS_WWW" == "$DNS_A" ]]; then
         emit_check ok "DNS A : www.${HOSTNAME_FQDN} → ${DNS_WWW}"
@@ -1084,7 +1084,7 @@ verify_dns() {
     fi
 
     # AAAA record (IPv6)
-    DNS_AAAA=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "$HOSTNAME_FQDN" @8.8.8.8 2>/dev/null | head -1)
+    DNS_AAAA=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "$HOSTNAME_FQDN" @${DNS_RESOLVER} 2>/dev/null | head -1)
     if [[ -n "$DNS_AAAA" ]]; then
       if [[ -n "$SERVER_IP6" && "$DNS_AAAA" == "$SERVER_IP6" ]]; then
         emit_check ok "DNS AAAA : ${HOSTNAME_FQDN} → ${DNS_AAAA} (correspond à ce serveur)"
@@ -1102,7 +1102,7 @@ verify_dns() {
     fi
 
     # AAAA www
-    DNS_WWW6=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "www.${HOSTNAME_FQDN}" @8.8.8.8 2>/dev/null | head -1)
+    DNS_WWW6=$(dig +short +timeout="${DNS_TIMEOUT}" AAAA "www.${HOSTNAME_FQDN}" @${DNS_RESOLVER} 2>/dev/null | head -1)
     if [[ -n "$DNS_WWW6" ]]; then
       if [[ -n "$SERVER_IP6" && "$DNS_WWW6" == "$SERVER_IP6" ]]; then
         emit_check ok "DNS AAAA : www.${HOSTNAME_FQDN} → ${DNS_WWW6}"
@@ -1116,7 +1116,7 @@ verify_dns() {
     fi
 
     # MX
-    DNS_MX=$(dig +short +timeout="${DNS_TIMEOUT}" MX "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | head -1)
+    DNS_MX=$(dig +short +timeout="${DNS_TIMEOUT}" MX "$BASE_DOMAIN" @${DNS_RESOLVER} 2>/dev/null | head -1)
     if [[ -n "$DNS_MX" ]]; then
       emit_check ok "DNS MX : ${BASE_DOMAIN} → ${DNS_MX}"
     else
@@ -1124,7 +1124,7 @@ verify_dns() {
     fi
 
     # SPF
-    DNS_SPF=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | grep -i "v=spf1" | head -1 || true)
+    DNS_SPF=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "$BASE_DOMAIN" @${DNS_RESOLVER} 2>/dev/null | grep -i "v=spf1" | head -1 || true)
     if [[ -n "$DNS_SPF" ]]; then
       if [[ "$DNS_SPF" =~ (include:|a\ |mx\ |ip4:) ]]; then
         emit_check ok "DNS SPF : ${DNS_SPF}"
@@ -1137,7 +1137,7 @@ verify_dns() {
 
     # DKIM DNS
     if [[ -n "${DKIM_SELECTOR:-}" && -n "${DKIM_DOMAIN:-}" ]]; then
-      DNS_DKIM=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @8.8.8.8 2>/dev/null | head -1)
+      DNS_DKIM=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN}" @${DNS_RESOLVER} 2>/dev/null | head -1)
       if [[ -n "$DNS_DKIM" ]]; then
         if [[ "$DNS_DKIM" == *"v=DKIM1"* ]]; then
           emit_check ok "DNS DKIM : ${DKIM_SELECTOR}._domainkey.${DKIM_DOMAIN} configuré"
@@ -1150,7 +1150,7 @@ verify_dns() {
     fi
 
     # DMARC
-    DNS_DMARC=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "_dmarc.${BASE_DOMAIN}" @8.8.8.8 2>/dev/null | grep -i "v=DMARC1" | head -1 || true)
+    DNS_DMARC=$(dig +short +timeout="${DNS_TIMEOUT}" TXT "_dmarc.${BASE_DOMAIN}" @${DNS_RESOLVER} 2>/dev/null | grep -i "v=DMARC1" | head -1 || true)
     if [[ -n "$DNS_DMARC" ]]; then
       if [[ "$DNS_DMARC" =~ p=(none|quarantine|reject) ]]; then
         local dmarc_policy="${BASH_REMATCH[1]}"
@@ -1199,7 +1199,7 @@ verify_dns() {
     fi
 
     # CAA (Certificate Authority Authorization)
-    DNS_CAA=$(dig +short +timeout="${DNS_TIMEOUT}" CAA "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | head -3)
+    DNS_CAA=$(dig +short +timeout="${DNS_TIMEOUT}" CAA "$BASE_DOMAIN" @${DNS_RESOLVER} 2>/dev/null | head -3)
     if [[ -n "$DNS_CAA" ]]; then
       emit_check ok "DNS CAA : ${BASE_DOMAIN} → $(echo "$DNS_CAA" | head -1)"
     else
@@ -1207,7 +1207,7 @@ verify_dns() {
     fi
 
     # NS (nameservers)
-    DNS_NS=$(dig +short +timeout="${DNS_TIMEOUT}" NS "$BASE_DOMAIN" @8.8.8.8 2>/dev/null | sort)
+    DNS_NS=$(dig +short +timeout="${DNS_TIMEOUT}" NS "$BASE_DOMAIN" @${DNS_RESOLVER} 2>/dev/null | sort)
     if [[ -n "$DNS_NS" ]]; then
       local ns_count
       ns_count=$(echo "$DNS_NS" | wc -l)

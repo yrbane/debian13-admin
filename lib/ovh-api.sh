@@ -76,9 +76,9 @@ ovh_dns_get() {
 
 # Créer un enregistrement DNS
 # $1 = zone, $2 = subdomain, $3 = fieldType, $4 = target (valeur)
-# $5 = ttl (optionnel, défaut 3600)
+# $5 = ttl (optionnel, défaut DNS_TTL_DEFAULT)
 ovh_dns_create() {
-  local zone="$1" sub="$2" ftype="$3" target="$4" ttl="${5:-3600}"
+  local zone="$1" sub="$2" ftype="$3" target="$4" ttl="${5:-${DNS_TTL_DEFAULT:-3600}}"
   local body="{\"fieldType\":\"${ftype}\",\"subDomain\":\"${sub}\",\"target\":${target},\"ttl\":${ttl}}"
   ovh_api POST "/domain/zone/${zone}/record" "$body" || return 1
 }
@@ -123,7 +123,7 @@ ovh_test_credentials() {
 # $1 = zone, $2 = server IP
 ovh_setup_spf() {
   local zone="$1" server_ip="$2"
-  local spf_value="\"v=spf1 a mx ip4:${server_ip} include:mx.ovh.com ~all\""
+  local spf_value="\"v=spf1 a mx ip4:${server_ip} include:${SPF_INCLUDE_OVH:-mx.ovh.com} ~all\""
   local existing_id
   existing_id=$(ovh_dns_find "$zone" "" "TXT") || { err "SPF : erreur API"; return 1; }
 
@@ -180,7 +180,8 @@ ovh_setup_dkim() {
 # $1 = zone, $2 = email admin (pour les rapports)
 ovh_setup_dmarc() {
   local zone="$1" admin_email="$2"
-  local dmarc_value="\"v=DMARC1; p=quarantine; rua=mailto:${admin_email}; sp=quarantine; aspf=r;\""
+  local policy="${DMARC_POLICY:-quarantine}"
+  local dmarc_value="\"v=DMARC1; p=${policy}; rua=mailto:${admin_email}; sp=${policy}; aspf=r;\""
 
   local existing_id
   existing_id=$(ovh_dns_find "$zone" "_dmarc" "TXT") || { err "DMARC : erreur API"; return 1; }
