@@ -83,13 +83,42 @@ save_config() {
   log "Configuration sauvegardée dans ${CONFIG_FILE}"
 }
 
+# Valider une ligne de configuration.
+# Accepte: commentaires, lignes vides, VAR=bool, VAR=int, VAR="safe string", VAR=simple
+# Rejette: $(), ``, ${}, ;, |, &, <, >, (, ), toute forme d'execution de code
+validate_config_line() {
+  local line="$1"
+  # Commentaires et lignes vides : OK
+  [[ "$line" =~ ^[[:space:]]*$ ]] && return 0
+  [[ "$line" =~ ^[[:space:]]*# ]] && return 0
+  # Rejeter tout caractere dangereux (shell metacharacters)
+  # Doit etre fait AVANT le pattern matching pour bloquer les injections dans les quotes
+  if [[ "$line" =~ [\$\`\;$'\n'] ]] || [[ "$line" =~ [^a-zA-Z0-9_=\"\ .,:/@+%{}\'-] && "$line" =~ [\|\&\<\>\(\)] ]]; then
+    return 1
+  fi
+  # Pattern strict : UPPER_VAR=value
+  # Valeurs autorisees: true, false, entier, "chaine sans $`", mot simple sans $`
+  if [[ "$line" =~ ^[A-Z_][A-Z_0-9]*=(true|false|[0-9]+|\"[^\"$\`]*\"|[a-zA-Z0-9_./@:+%-]*)$ ]]; then
+    return 0
+  fi
+  return 1
+}
+
 load_config() {
   if [[ -f "$CONFIG_FILE" ]]; then
-    # Vérifier que le fichier ne contient que des affectations simples (pas de $(), backticks, etc.)
-    if grep -qvE '^\s*#|^\s*$|^[A-Z_][A-Z_0-9]*=(true|false|[0-9]+|"[^"$`]*"|[^"$`[:space:]]*)$' "$CONFIG_FILE"; then
+    # Valider chaque ligne du fichier de configuration
+    local line_num=0 bad_lines=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      ((++line_num))
+      if ! validate_config_line "$line"; then
+        bad_lines+="  L${line_num}: ${line}\n"
+      fi
+    done < "$CONFIG_FILE"
+    if [[ -n "$bad_lines" ]]; then
       warn "Le fichier de config ${CONFIG_FILE} contient des lignes suspectes :"
-      grep -vE '^\s*#|^\s*$|^[A-Z_][A-Z_0-9]*=(true|false|[0-9]+|"[^"$`]*"|[^"$`[:space:]]*)$' "$CONFIG_FILE" | head -5
+      printf "%b" "$bad_lines" | head -5
       die "Corrigez le fichier de config ou supprimez-le pour le recréer."
+      return 2  # die exits in production; fallback for tests
     fi
     # Extraire la version du fichier avant sourcing (CONFIG_VERSION est readonly)
     local file_version
