@@ -433,6 +433,78 @@ EOF
   log "Fail2ban: filtres et jails étendus déployés"
 }
 
+# ---------------------------------- Snapshots & Rollback -------------------------------
+
+: "${SNAPSHOT_DIR:=/var/lib/debian13-snapshots}"
+
+# Créer un snapshot de l'état actuel
+# $1 = label (ex: "before-domain-add")
+snapshot_create() {
+  local label="$1"
+  local ts
+  ts=$(date +%Y%m%d-%H%M%S)
+  local snap_id="${ts}-${label}"
+  local snap_dir="${SNAPSHOT_DIR}/${snap_id}"
+  mkdir -p "${snap_dir}/apache" "${snap_dir}/logrotate"
+
+  # Sauvegarder domains.conf
+  [[ -f "${DOMAINS_CONF:-}" ]] && cp "$DOMAINS_CONF" "${snap_dir}/domains.conf"
+
+  # Sauvegarder configs Apache
+  if [[ -d "${APACHE_SITES_DIR:-}" ]]; then
+    cp "${APACHE_SITES_DIR}"/*.conf "${snap_dir}/apache/" 2>/dev/null || true
+  fi
+
+  # Sauvegarder logrotate
+  if [[ -d "${LOGROTATE_DIR:-}" ]]; then
+    cp "${LOGROTATE_DIR}"/apache-vhost-* "${snap_dir}/logrotate/" 2>/dev/null || true
+  fi
+
+  # Sauvegarder per-domain configs
+  if [[ -d "${DOMAINS_CONF_DIR:-}" ]]; then
+    cp -r "$DOMAINS_CONF_DIR" "${snap_dir}/domains.d" 2>/dev/null || true
+  fi
+
+  echo "$snap_id"
+}
+
+# Lister les snapshots disponibles
+snapshot_list() {
+  [[ -d "$SNAPSHOT_DIR" ]] || return 0
+  ls -1 "$SNAPSHOT_DIR" 2>/dev/null
+}
+
+# Restaurer un snapshot
+# $1 = snapshot ID
+snapshot_restore() {
+  local snap_id="$1"
+  local snap_dir="${SNAPSHOT_DIR}/${snap_id}"
+  if [[ ! -d "$snap_dir" ]]; then
+    err "Snapshot introuvable : ${snap_id}"
+    return 1
+  fi
+
+  # Restaurer domains.conf
+  [[ -f "${snap_dir}/domains.conf" ]] && cp "${snap_dir}/domains.conf" "$DOMAINS_CONF"
+
+  # Restaurer Apache configs
+  if [[ -d "${snap_dir}/apache" ]] && ls "${snap_dir}/apache/"*.conf >/dev/null 2>&1; then
+    cp "${snap_dir}/apache/"*.conf "${APACHE_SITES_DIR}/"
+  fi
+
+  # Restaurer logrotate
+  if [[ -d "${snap_dir}/logrotate" ]] && ls "${snap_dir}/logrotate/"* >/dev/null 2>&1; then
+    cp "${snap_dir}/logrotate/"* "${LOGROTATE_DIR}/"
+  fi
+
+  # Restaurer per-domain configs
+  if [[ -d "${snap_dir}/domains.d" ]]; then
+    cp -r "${snap_dir}/domains.d/"* "${DOMAINS_CONF_DIR}/" 2>/dev/null || true
+  fi
+
+  log "Snapshot restauré : ${snap_id}"
+}
+
 # ---------------------------------- Health endpoint -----------------------------------
 
 # Déployer un script /healthz pour un domaine

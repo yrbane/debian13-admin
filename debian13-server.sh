@@ -216,6 +216,8 @@ CLONE_KEYGEN=false
 CLONE_TARGET=""
 CLONE_PORT="22"
 DASHBOARD_DOMAIN=""
+ROLLBACK_ID=""
+SNAPSHOT_LIST_MODE=false
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -277,6 +279,11 @@ while [[ $# -gt 0 ]]; do
       shift; DASHBOARD_DOMAIN="${1:-}"
       [[ -z "$DASHBOARD_DOMAIN" ]] && die "--dashboard nécessite un nom de domaine."
       ;;
+    --rollback)
+      shift; ROLLBACK_ID="${1:-}"
+      [[ -z "$ROLLBACK_ID" ]] && die "--rollback nécessite un ID de snapshot."
+      ;;
+    --snapshot-list) SNAPSHOT_LIST_MODE=true ;;
     --clone-keygen) CLONE_KEYGEN=true ;;
     --clone)
       shift; CLONE_TARGET="${1:-}"
@@ -761,6 +768,7 @@ fi
 if [[ -n "$DOMAIN_ADD" ]]; then
   section "Ajout du domaine : ${DOMAIN_ADD}"
   local_selector="${DOMAIN_ADD_SELECTOR:-mail}"
+  snapshot_create "before-domain-add-${DOMAIN_ADD}" >/dev/null 2>&1 || true
   run_hooks "pre-domain-add" "$DOMAIN_ADD" "$local_selector"
 
   if dm_domain_exists "$DOMAIN_ADD"; then
@@ -858,6 +866,7 @@ if [[ -n "$DOMAIN_REMOVE" ]]; then
   fi
 
   # Suppression
+  snapshot_create "before-domain-remove-${DOMAIN_REMOVE}" >/dev/null 2>&1 || true
   run_hooks "pre-domain-remove" "$DOMAIN_REMOVE"
   dm_remove_vhosts "$DOMAIN_REMOVE"
   dm_remove_logrotate "$DOMAIN_REMOVE"
@@ -901,6 +910,22 @@ if [[ -n "$DOMAIN_IMPORT" ]]; then
     systemctl reload apache2 2>/dev/null || true
   fi
   log "Domaine importé. Vérifiez avec : sudo $0 --domain-check ${local_imported_domain:-}"
+  exit 0
+fi
+
+# --- --snapshot-list ---
+if $SNAPSHOT_LIST_MODE; then
+  section "Snapshots disponibles"
+  snapshot_list
+  exit 0
+fi
+
+# --- --rollback ---
+if [[ -n "$ROLLBACK_ID" ]]; then
+  section "Rollback vers : ${ROLLBACK_ID}"
+  load_config
+  snapshot_restore "$ROLLBACK_ID" || exit 1
+  log "Rollback terminé. Vérifiez avec : sudo $0 --audit"
   exit 0
 fi
 
