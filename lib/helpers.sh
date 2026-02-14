@@ -464,6 +464,193 @@ HEALTHZ
   log "Healthz endpoint déployé pour ${domain}"
 }
 
+# ---------------------------------- Dashboard temps réel -------------------------------
+
+# Déployer un dashboard de monitoring accessible via URL secrète
+# $1 = domain
+deploy_dashboard() {
+  local domain="$1"
+  local secret="${DASHBOARD_SECRET:-$(echo "${domain}dashboard" | md5sum | cut -d' ' -f1)}"
+  local dashdir="${WEB_ROOT}/${domain}/www/public/dashboard-${secret}"
+  mkdir -p "$dashdir"
+
+  # --- .htaccess : restriction IP ---
+  {
+    echo "Require all denied"
+    for ip in ${TRUSTED_IPS:-127.0.0.1}; do
+      echo "Require ip ${ip}"
+    done
+  } > "${dashdir}/.htaccess"
+
+  # --- API CGI endpoint ---
+  cat > "${dashdir}/api.cgi" <<'APICGI'
+#!/bin/bash
+echo "Content-Type: application/json"
+echo ""
+
+# Services status
+svc_status() {
+  if systemctl is-active --quiet "$1" 2>/dev/null; then
+    echo "running"
+  else
+    echo "stopped"
+  fi
+}
+
+# SSL days remaining
+ssl_days() {
+  local cert="/etc/letsencrypt/live/$1/fullchain.pem"
+  if [[ -f "$cert" ]]; then
+    local exp
+    exp=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | cut -d= -f2)
+    if [[ -n "$exp" ]]; then
+      local exp_epoch now_epoch
+      exp_epoch=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+      now_epoch=$(date +%s)
+      echo $(( (exp_epoch - now_epoch) / 86400 ))
+      return
+    fi
+  fi
+  echo "N/A"
+}
+
+# Fail2ban stats
+f2b_banned() {
+  fail2ban-client status "$1" 2>/dev/null | grep "Currently banned" | awk '{print $NF}' || echo "0"
+}
+
+HOSTNAME_FQDN="$(hostname -f 2>/dev/null || echo unknown)"
+
+cat <<JSON
+{
+  "hostname": "${HOSTNAME_FQDN}",
+  "timestamp": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "uptime": "$(uptime -p 2>/dev/null || echo unknown)",
+  "load": "$(cat /proc/loadavg 2>/dev/null | cut -d' ' -f1-3)",
+  "cpu_count": $(nproc 2>/dev/null || echo 1),
+  "memory": {
+    "total_mb": $(free -m 2>/dev/null | awk '/Mem:/{print $2}' || echo 0),
+    "used_mb": $(free -m 2>/dev/null | awk '/Mem:/{print $3}' || echo 0),
+    "available_mb": $(free -m 2>/dev/null | awk '/Mem:/{print $7}' || echo 0)
+  },
+  "disk": {
+    "used": "$(df -h / 2>/dev/null | awk 'NR==2{print $5}')",
+    "avail": "$(df -h / 2>/dev/null | awk 'NR==2{print $4}')",
+    "total": "$(df -h / 2>/dev/null | awk 'NR==2{print $2}')"
+  },
+  "services": {
+    "apache2": "$(svc_status apache2)",
+    "postfix": "$(svc_status postfix)",
+    "opendkim": "$(svc_status opendkim)",
+    "mariadb": "$(svc_status mariadb)",
+    "fail2ban": "$(svc_status fail2ban)",
+    "ufw": "$(svc_status ufw)",
+    "clamav": "$(svc_status clamav-daemon)"
+  },
+  "ssl": {
+    "days_remaining": "$(ssl_days "${HOSTNAME_FQDN}")"
+  },
+  "fail2ban": {
+    "sshd_banned": "$(f2b_banned sshd)",
+    "recidive_banned": "$(f2b_banned recidive)"
+  },
+  "postfix_queue": $(mailq 2>/dev/null | tail -1 | grep -oP '\d+' | head -1 || echo 0)
+}
+JSON
+APICGI
+  chmod +x "${dashdir}/api.cgi"
+
+  # --- Dashboard HTML ---
+  cat > "${dashdir}/index.html" <<DASHHTML
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Dashboard — ${domain}</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a1a;color:#e0e0e0;min-height:100vh}
+.header{background:linear-gradient(135deg,#0d1b2a,#1b2838);padding:1.5em 2em;border-bottom:1px solid #1e3a5f}
+.header h1{font-size:1.4em;color:#6bdbdb}
+.header .ts{font-size:.85em;color:#888;margin-top:4px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1em;padding:1.5em}
+.card{background:#111827;border:1px solid #1e3a5f;border-radius:12px;padding:1.2em}
+.card h2{font-size:1em;color:#6bdbdb;margin-bottom:.8em;text-transform:uppercase;letter-spacing:1px}
+.metric{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1a2332}
+.metric:last-child{border-bottom:none}
+.metric .label{color:#999}.metric .value{font-weight:600}
+.ok{color:#2dd4bf}.warn{color:#fbbf24}.crit{color:#f87171}.stopped{color:#f87171}
+.running{color:#2dd4bf}
+.bar{background:#1a2332;border-radius:4px;height:8px;margin-top:4px}
+.bar-fill{height:100%;border-radius:4px;transition:width .5s}
+.refresh-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:8px;background:#2dd4bf;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>${domain} <span class="refresh-dot"></span></h1>
+  <div class="ts" id="ts">Chargement...</div>
+</div>
+<div class="grid" id="grid"></div>
+<script>
+const API='api.cgi';
+function pct(u,t){return t>0?Math.round(u/t*100):0}
+function svcClass(s){return s==='running'?'running':'stopped'}
+function render(d){
+  document.getElementById('ts').textContent='Mis à jour : '+d.timestamp+' | Uptime : '+d.uptime;
+  const memPct=pct(d.memory.used_mb,d.memory.total_mb);
+  const diskPct=parseInt(d.disk.used)||0;
+  let html='';
+  // System
+  html+='<div class="card"><h2>Système</h2>';
+  html+='<div class="metric"><span class="label">Hostname</span><span class="value">'+d.hostname+'</span></div>';
+  html+='<div class="metric"><span class="label">Load</span><span class="value">'+d.load+'</span></div>';
+  html+='<div class="metric"><span class="label">CPUs</span><span class="value">'+d.cpu_count+'</span></div>';
+  html+='</div>';
+  // Memory
+  html+='<div class="card"><h2>Mémoire</h2>';
+  html+='<div class="metric"><span class="label">Utilisée</span><span class="value '+(memPct>85?'crit':memPct>70?'warn':'ok')+'">'+d.memory.used_mb+'/'+d.memory.total_mb+' MB ('+memPct+'%)</span></div>';
+  html+='<div class="bar"><div class="bar-fill" style="width:'+memPct+'%;background:'+(memPct>85?'#f87171':memPct>70?'#fbbf24':'#2dd4bf')+'"></div></div>';
+  html+='</div>';
+  // Disk
+  html+='<div class="card"><h2>Disque</h2>';
+  html+='<div class="metric"><span class="label">Utilisé</span><span class="value '+(diskPct>90?'crit':diskPct>75?'warn':'ok')+'">'+d.disk.used+' de '+d.disk.total+'</span></div>';
+  html+='<div class="bar"><div class="bar-fill" style="width:'+diskPct+'%;background:'+(diskPct>90?'#f87171':diskPct>75?'#fbbf24':'#2dd4bf')+'"></div></div>';
+  html+='<div class="metric"><span class="label">Disponible</span><span class="value">'+d.disk.avail+'</span></div>';
+  html+='</div>';
+  // Services
+  html+='<div class="card"><h2>Services</h2>';
+  for(const[k,v]of Object.entries(d.services)){
+    html+='<div class="metric"><span class="label">'+k+'</span><span class="value '+svcClass(v)+'">'+v+'</span></div>';
+  }
+  html+='</div>';
+  // SSL
+  html+='<div class="card"><h2>SSL / TLS</h2>';
+  const days=parseInt(d.ssl.days_remaining)||0;
+  const dStr=d.ssl.days_remaining;
+  html+='<div class="metric"><span class="label">Expiration</span><span class="value '+(days<14?'crit':days<30?'warn':'ok')+'">'+dStr+' jours</span></div>';
+  html+='</div>';
+  // Fail2ban
+  html+='<div class="card"><h2>Fail2ban</h2>';
+  html+='<div class="metric"><span class="label">SSH bannis</span><span class="value">'+d.fail2ban.sshd_banned+'</span></div>';
+  html+='<div class="metric"><span class="label">Récidive</span><span class="value">'+d.fail2ban.recidive_banned+'</span></div>';
+  html+='<div class="metric"><span class="label">File Postfix</span><span class="value">'+d.postfix_queue+'</span></div>';
+  html+='</div>';
+  document.getElementById('grid').innerHTML=html;
+}
+function refresh(){fetch(API).then(r=>r.json()).then(render).catch(()=>{document.getElementById('ts').textContent='Erreur de connexion';})}
+refresh();
+setInterval(refresh,10000);
+</script>
+</body>
+</html>
+DASHHTML
+
+  log "Dashboard déployé : https://${domain}/dashboard-${secret}/"
+}
+
 # ---------------------------------- Dry-run mode (Point 23) ---------------------------
 
 # Wrapper : exécute la commande sauf si DRY_RUN=true

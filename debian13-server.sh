@@ -215,6 +215,7 @@ AUDIT_HTML=""
 CLONE_KEYGEN=false
 CLONE_TARGET=""
 CLONE_PORT="22"
+DASHBOARD_DOMAIN=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --noninteractive) NONINTERACTIVE=true ;;
@@ -271,6 +272,10 @@ while [[ $# -gt 0 ]]; do
     --audit-html)
       shift; AUDIT_HTML="${1:-}"
       [[ -z "$AUDIT_HTML" ]] && die "--audit-html nécessite un chemin de sortie."
+      ;;
+    --dashboard)
+      shift; DASHBOARD_DOMAIN="${1:-}"
+      [[ -z "$DASHBOARD_DOMAIN" ]] && die "--dashboard nécessite un nom de domaine."
       ;;
     --clone-keygen) CLONE_KEYGEN=true ;;
     --clone)
@@ -825,6 +830,8 @@ if [[ -n "$DOMAIN_ADD" ]]; then
   echo ""
   print_note "Vérifier le domaine :"
   print_cmd "sudo $0 --domain-check ${DOMAIN_ADD}"
+  print_note "Déployer le dashboard :"
+  print_cmd "sudo $0 --dashboard ${DOMAIN_ADD}"
   echo ""
   exit 0
 fi
@@ -894,6 +901,18 @@ if [[ -n "$DOMAIN_IMPORT" ]]; then
     systemctl reload apache2 2>/dev/null || true
   fi
   log "Domaine importé. Vérifiez avec : sudo $0 --domain-check ${local_imported_domain:-}"
+  exit 0
+fi
+
+# --- --dashboard ---
+if [[ -n "$DASHBOARD_DOMAIN" ]]; then
+  section "Dashboard pour ${DASHBOARD_DOMAIN}"
+  load_config
+  DASHBOARD_SECRET="${DASHBOARD_SECRET:-$(echo "${DASHBOARD_DOMAIN}dashboard${RANDOM}" | md5sum | cut -d' ' -f1)}"
+  deploy_dashboard "$DASHBOARD_DOMAIN"
+  echo ""
+  log "Dashboard accessible : https://${DASHBOARD_DOMAIN}/dashboard-${DASHBOARD_SECRET}/"
+  log "Restreint aux IPs : ${TRUSTED_IPS:-127.0.0.1}"
   exit 0
 fi
 
