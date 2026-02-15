@@ -167,6 +167,7 @@ show_help() {
   printf "  - Composer (global)\n"
   printf "  - Confort shell (neofetch, fortune-mod, cowsay, lolcat, grc, p7zip, unrar)\n"
   printf "  - ClamAV (freshclam + daemon)\n"
+  printf "  - WebSec (reverse proxy securite HTTP devant Apache)\n"
   printf "  - .bashrc commun pour tous les utilisateurs\n"
   printf "\n"
 
@@ -938,6 +939,13 @@ if [[ -n "$DOMAIN_ADD" ]]; then
     systemctl reload apache2 2>/dev/null || true
   fi
 
+  # 7b. Si WebSec est actif, re-migrer les VHosts du nouveau domaine
+  if systemctl is-active --quiet websec 2>/dev/null; then
+    log "WebSec actif — migration des VHosts du nouveau domaine..."
+    websec setup --noninteractive -c /etc/websec/websec.toml
+    systemctl reload apache2
+  fi
+
   # 8. Logrotate
   log "Configuration logrotate..."
   dm_deploy_logrotate "$DOMAIN_ADD"
@@ -1410,6 +1418,17 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
   print_cmd "tail -f ${MODSEC_AUDIT_LOG}"
   print_note "Activer le blocage (après validation) :"
   print_cmd "sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' ${MODSEC_CONFIG} && systemctl restart apache2"
+  echo ""
+fi
+
+if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
+  print_title "WebSec (reverse proxy securite)"
+  print_note "Proxy actif sur :80/:443, Apache sur port interne."
+  print_cmd "systemctl status websec"
+  print_cmd "websec stats"
+  print_cmd "curl -sI https://${HOSTNAME_FQDN} | grep X-WebSec"
+  print_note "Pour desactiver et restaurer Apache :"
+  print_cmd "sudo websec restore -c /etc/websec/websec.toml"
   echo ""
 fi
 

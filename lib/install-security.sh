@@ -338,6 +338,94 @@ MODSECCONF
   fi
 fi
 
+# ---------------------------------- 14f2) WebSec (reverse proxy sécurité) -----------
+# WebSec est un reverse proxy de sécurité Rust qui se place devant Apache pour
+# détecter les menaces HTTP en temps réel (SQLi, XSS, bots, scans, brute-force...).
+# Il écoute sur :80/:443 (avec TLS termination) et forward vers Apache sur un port interne.
+# La commande `websec setup --noninteractive` migre automatiquement les VHosts Apache.
+if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
+  if step_needed "sec_websec"; then
+    section "WebSec (reverse proxy securite)"
+
+    # 1. Dependances (Rust est deja gere par install-devtools.sh si INSTALL_RUST=true)
+    apt_install git pkg-config libssl-dev
+
+    # 2. Installer Rust si pas deja present
+    if ! command -v cargo &>/dev/null; then
+      log "Installation de Rust (requis pour WebSec)..."
+      curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+      source "$HOME/.cargo/env"
+    fi
+
+    # 3. Utilisateur systeme
+    if ! id websec &>/dev/null; then
+      useradd -r -s /usr/sbin/nologin -d /opt/websec websec
+    fi
+    mkdir -p /opt/websec /etc/websec /var/log/websec /var/lib/websec
+    chown websec:websec /opt/websec /var/log/websec /var/lib/websec
+
+    # 4. Clone ou update
+    if [[ -d /opt/websec/.git ]]; then
+      cd /opt/websec
+      sudo -u websec git pull --ff-only || true
+    else
+      git clone https://github.com/yrbane/websec.git /opt/websec
+      chown -R websec:websec /opt/websec
+    fi
+
+    # 5. Compiler
+    cd /opt/websec
+    cargo build --release --features tls
+    cp /opt/websec/target/release/websec /usr/local/bin/websec
+    chmod 755 /usr/local/bin/websec
+    setcap 'cap_net_bind_service=+ep' /usr/local/bin/websec
+
+    # 6. Config initiale (si absente)
+    if [[ ! -f /etc/websec/websec.toml ]]; then
+      cp /opt/websec/config/websec.toml.example /etc/websec/websec.toml
+      chown root:websec /etc/websec/websec.toml
+      chmod 640 /etc/websec/websec.toml
+      # Defaut sled au lieu de redis (pas de dependance externe)
+      sed -i 's|type = "redis"|type = "sled"|' /etc/websec/websec.toml
+      sed -i 's|# path = "websec.db"|path = "/var/lib/websec/websec.db"|' /etc/websec/websec.toml
+    fi
+
+    # 7. Service systemd
+    cp /opt/websec/systemd/websec.service /etc/systemd/system/websec.service
+    # Remplacer NoNewPrivileges par AmbientCapabilities (compatibilite setcap)
+    if grep -q "NoNewPrivileges=yes" /etc/systemd/system/websec.service; then
+      sed -i '/NoNewPrivileges=yes/d' /etc/systemd/system/websec.service
+      sed -i '/\[Service\]/a AmbientCapabilities=CAP_NET_BIND_SERVICE' /etc/systemd/system/websec.service
+    fi
+    systemctl daemon-reload
+
+    # 8. Setup Apache (non-interactif) — migre les ports et met a jour websec.toml
+    websec setup --noninteractive -c /etc/websec/websec.toml
+
+    # 9. Whitelist des IPs de confiance dans WebSec
+    if [[ -n "${TRUSTED_IPS:-}" ]]; then
+      for ip in $TRUSTED_IPS; do
+        websec lists whitelist add "$ip" 2>/dev/null || true
+      done
+    fi
+    # Toujours whitelister localhost
+    websec lists whitelist add "127.0.0.1" 2>/dev/null || true
+    websec lists whitelist add "::1" 2>/dev/null || true
+
+    # 10. Demarrer
+    systemctl enable --now websec
+    systemctl reload apache2
+
+    log "WebSec installe et actif devant Apache."
+    log "Dashboard: http://localhost:9090/metrics"
+    log "Pour desactiver: websec restore -c /etc/websec/websec.toml"
+
+    mark_done "sec_websec"
+  else
+    log "sec_websec (deja fait)"
+  fi
+fi
+
 # ---------------------------------- 14g) AppArmor ------------------------------------
 # AppArmor = Mandatory Access Control (MAC) qui confine les processus dans des profils.
 # Même si Apache est compromis, AppArmor limite ce que le processus peut lire/écrire/exécuter.

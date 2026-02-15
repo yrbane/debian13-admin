@@ -40,7 +40,7 @@ CONFIG_VARS=(
   "INSTALL_COMPOSER|bool"  "INSTALL_SYMFONY|bool"  "INSTALL_SHELL_FUN|bool"
   "INSTALL_YTDL|bool"  "INSTALL_CLAMAV|bool"  "INSTALL_RKHUNTER|bool"
   "INSTALL_LOGWATCH|bool"  "INSTALL_SSH_ALERT|bool"  "INSTALL_AIDE|bool"
-  "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "INSTALL_APPARMOR|bool"  "INSTALL_AUDITD|bool"  "EGRESS_FILTER|bool"
+  "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "INSTALL_WEBSEC|bool"  "INSTALL_APPARMOR|bool"  "INSTALL_AUDITD|bool"  "EGRESS_FILTER|bool"
   "SECURE_TMP|bool"  "INSTALL_BASHRC_GLOBAL|bool"
   "TRUSTED_IPS|str"
   "SLACK_WEBHOOK|str"  "TELEGRAM_BOT_TOKEN|str"  "TELEGRAM_CHAT_ID|str"  "DISCORD_WEBHOOK|str"
@@ -56,7 +56,7 @@ declare -A MODULE_DEFAULTS=(
   [INSTALL_COMPOSER]=true  [INSTALL_SYMFONY]=false  [INSTALL_SHELL_FUN]=true
   [INSTALL_YTDL]=false  [INSTALL_CLAMAV]=true  [INSTALL_RKHUNTER]=true
   [INSTALL_LOGWATCH]=true  [INSTALL_SSH_ALERT]=true  [INSTALL_AIDE]=true
-  [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [INSTALL_APPARMOR]=true  [INSTALL_AUDITD]=true  [EGRESS_FILTER]=false
+  [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [INSTALL_WEBSEC]=false  [INSTALL_APPARMOR]=true  [INSTALL_AUDITD]=true  [EGRESS_FILTER]=false
   [SECURE_TMP]=true  [INSTALL_BASHRC_GLOBAL]=true
   [TRUSTED_IPS]=""
   [SLACK_WEBHOOK]=""  [TELEGRAM_BOT_TOKEN]=""  [TELEGRAM_CHAT_ID]=""  [DISCORD_WEBHOOK]=""
@@ -334,6 +334,10 @@ ask_all_questions() {
   MODSEC_ENFORCE=false
   if $INSTALL_MODSEC_CRS; then
     prompt_yes_no "Activer ModSecurity en mode blocage (On) au lieu de DetectionOnly ?" "n" && MODSEC_ENFORCE=true
+  fi
+  INSTALL_WEBSEC=false
+  if $INSTALL_APACHE_PHP; then
+    prompt_yes_no "Installer WebSec (reverse proxy securite devant Apache) ?" "n" && INSTALL_WEBSEC=true
   fi
   SECURE_TMP=true
   prompt_yes_no "Sécuriser /tmp (noexec, nosuid, nodev) ?" "y" || SECURE_TMP=false
