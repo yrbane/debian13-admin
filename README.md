@@ -52,6 +52,12 @@ sudo ./debian13-server.sh
 # Mode silencieux (valeurs par defaut sures)
 sudo ./debian13-server.sh --noninteractive
 
+# Reprendre apres interruption (automatique)
+sudo ./debian13-server.sh
+
+# Repartir de zero (ignorer la progression)
+sudo ./debian13-server.sh --fresh
+
 # Simulation sans modification
 sudo ./debian13-server.sh --dry-run
 
@@ -62,6 +68,11 @@ sudo ./debian13-server.sh --audit
 > [!TIP]
 > **Premiere installation ?** Le script guide la configuration : hostname, SSH, email, OVH.
 > Les executions suivantes reutilisent `debian13-server.conf` automatiquement.
+
+> [!NOTE]
+> **Reprise automatique** — Si le script est interrompu (erreur, deconnexion, reboot),
+> il detecte la progression et propose de reprendre a la derniere etape reussie.
+> Utiliser `--fresh` pour forcer une reinstallation complete.
 
 ---
 
@@ -223,8 +234,11 @@ graph TD
     D --> Z["✅ Exit"]
 
     C -->|"Installation"| E["⚙️ Configuration"]
-    E --> F["install-base.sh\nSSH, UFW, GeoIP, Fail2ban"]
-    F --> G["install-web.sh\nApache, PHP, MariaDB, Postfix"]
+    E --> R{"Progression\ndetectee ?"}
+    R -->|"Oui"| S["⏩ Reprendre"]
+    R -->|"Non / --fresh"| F
+    S --> F
+    F["install-base.sh\nSSH, UFW, GeoIP, Fail2ban"] --> G["install-web.sh\nApache, PHP, MariaDB, Postfix"]
     G --> H["install-devtools.sh\nNode, Rust, Python"]
     H --> I["install-security.sh\nClamAV, AIDE, ModSec, AppArmor"]
     I --> J["🔍 verify.sh"]
@@ -243,6 +257,8 @@ graph TD
     class C decision
     class D action
     class E lib
+    class R decision
+    class S action
     class F,G,H,I install
     class J verify
     class K,Z done
@@ -340,9 +356,10 @@ sudo ./debian13-server.sh --fleet-exec "apt update"
 sudo ./debian13-server.sh --fleet-sync
 ```
 
-#### Observabilite
+#### Reprise & Observabilite
 
 ```bash
+sudo ./debian13-server.sh --fresh
 sudo ./debian13-server.sh --dashboard example.com
 sudo ./debian13-server.sh --audit
 sudo ./debian13-server.sh --audit-html /tmp/rapport.html
@@ -491,6 +508,7 @@ debian13-server.sh              ← Point d'entree unique
 ├── tests/                      43 fichiers — 465 tests bats
 ├── hooks.d/                    Scripts hook
 ├── domains.conf                Registre domaines
+├── .install-progress            Checkpoint reprise (auto-genere, auto-supprime)
 ├── Makefile                    test, lint, check-syntax, docker-test
 └── Dockerfile.test             Environnement test isole
 ```

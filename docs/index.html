@@ -500,7 +500,7 @@
 <section id="detail" class="detail-section">
     <div class="container">
         <h2 class="reveal">Sous le capot</h2>
-        <p class="section-desc reveal">16 phases d'installation orchestrees. Chaque composant est configure, durci et verifie.</p>
+        <p class="section-desc reveal">36 etapes d'installation orchestrees avec checkpoint/resume. Chaque composant est configure, durci et verifie.</p>
 
         <div class="detail-grid">
 
@@ -628,6 +628,7 @@
                     <li><strong>Snapshots</strong> Crees automatiquement avant chaque operation domaine, <code>--rollback</code> instantane</li>
                     <li><strong>Clonage</strong> <code>--clone &lt;ip&gt;</code> : rsync SSH des scripts, DKIM, VHosts, certs, logrotate</li>
                     <li><strong>Fleet</strong> Inventaire multi-serveurs (<code>fleet.conf</code>), exec distribue, sync config, status</li>
+                    <li><strong>Checkpoint</strong> Reprise automatique apres crash &mdash; 36 etapes trackees, <code>--fresh</code> pour repartir de zero</li>
                     <li><strong>Hooks</strong> Plugins <code>hooks.d/</code> : pre/post install, domain-add, domain-remove, backup</li>
                 </ul>
             </div>
@@ -635,7 +636,7 @@
         </div>
 
         <div class="callout-important reveal" style="margin-top:40px;">
-            <strong>Idempotent</strong> &mdash; Le script peut etre relance a tout moment sans casser ce qui existe. Chaque action verifie l'etat avant d'agir.
+            <strong>Idempotent &amp; resilient</strong> &mdash; Le script peut etre relance a tout moment sans casser ce qui existe. En cas d'interruption, il reprend automatiquement a la derniere etape reussie.
         </div>
     </div>
 </section>
@@ -792,10 +793,14 @@
 <span class="comment"># Mode silencieux</span>
 <span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --noninteractive</span>
 
-<span class="comment"># Simulation</span>
-<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --dry-run</span>
+<span class="comment"># Reprendre apres interruption</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh</span>
 
-<span class="comment"># Audit</span>
+<span class="comment"># Repartir de zero</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --fresh</span>
+
+<span class="comment"># Simulation / Audit</span>
+<span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --dry-run</span>
 <span class="prompt">$</span> <span class="cmd">sudo ./debian13-server.sh --audit</span></pre>
             </div>
 

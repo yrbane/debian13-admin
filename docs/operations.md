@@ -1,7 +1,62 @@
 # Guide des operations
 
 Operations courantes pour `debian13-server.sh` : monitoring, backup, clonage,
-fleet, rollback, dashboard, notifications.
+fleet, rollback, dashboard, notifications, reprise apres interruption.
+
+## Reprise apres interruption (checkpoint/resume)
+
+Le script enregistre chaque etape terminee dans `.install-progress`. Si
+l'installation est interrompue (erreur, deconnexion SSH, reboot), le script
+detecte automatiquement la progression et propose de reprendre.
+
+### Fonctionnement
+
+L'installation comporte 36 etapes reparties sur 4 fichiers :
+- `install-base.sh` : 7 etapes (locales, hostname, SSH, LLMNR, UFW, GeoIP, Fail2ban)
+- `install-web.sh` : 8 etapes (Apache/PHP, pages erreur, MariaDB, phpMyAdmin, Postfix, Certbot, VHosts, DNS)
+- `install-devtools.sh` : 7 etapes (outils dev, Node.js, Rust, Python, Composer, Symfony, shell fun)
+- `install-security.sh` : 13 etapes (ClamAV, rkhunter, Logwatch, alertes SSH, AIDE, ModSecurity, AppArmor, auditd, /tmp, sudo, sysctl, logrotate, bashrc)
+
+Chaque etape est marquee comme terminee *apres* son execution complete. Si une
+etape echoue a mi-parcours, elle sera entierement rejouee au prochain lancement.
+
+### Commandes
+
+```bash
+# Relancer apres interruption (detecte et propose la reprise)
+sudo ./debian13-server.sh
+
+# Forcer une reinstallation complete
+sudo ./debian13-server.sh --fresh
+```
+
+### Detection de changement de configuration
+
+Le fichier `.install-progress` stocke un hash de la configuration (flags
+`INSTALL_*`). Si la configuration a change entre deux executions, le script
+avertit que certaines etapes ignorees pourraient devoir etre rejouees.
+
+### Mode non-interactif
+
+En mode `--noninteractive`, la reprise est automatique sans confirmation.
+
+### Fichier de progression
+
+Le fichier `.install-progress` est cree dans le repertoire du script. Il
+contient les IDs des etapes completees :
+
+```
+# debian13-server progress
+# started=2026-02-15T01:30:22+01:00
+# config_hash=a3f7c8e9b2d1
+main_apt_update
+base_locales
+base_hostname
+base_ssh
+...
+```
+
+Ce fichier est automatiquement supprime a la fin d'une installation reussie.
 
 ## Dashboard temps reel
 
