@@ -373,7 +373,14 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     fi
     chown -R websec:websec /opt/websec
 
-    # 5. Compiler
+    # 5. Patch regex look-ahead non supporte par le crate regex de Rust
+    python3 -c '
+p="/opt/websec/src/cli/setup.rs"
+t=open(p).read()
+open(p,"w").write(t.replace(r":{from_port}(?=[^\d]|$)",r":{from_port}\b"))
+' 2>/dev/null || true
+
+    # 6. Compiler
     cd /opt/websec
     cargo build --release --features tls
     # Stopper le service avant de remplacer le binaire (evite "Text file busy")
@@ -382,7 +389,7 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     chmod 755 /usr/local/bin/websec
     setcap 'cap_net_bind_service=+ep' /usr/local/bin/websec
 
-    # 6. Config initiale (si absente)
+    # 7. Config initiale (si absente)
     if [[ ! -f /etc/websec/websec.toml ]]; then
       cp /opt/websec/config/websec.toml.example /etc/websec/websec.toml
       chown root:websec /etc/websec/websec.toml
@@ -392,7 +399,7 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
       sed -i 's|# path = "websec.db"|path = "/var/lib/websec/websec.db"|' /etc/websec/websec.toml
     fi
 
-    # 7. Service systemd
+    # 8. Service systemd
     cp /opt/websec/systemd/websec.service /etc/systemd/system/websec.service
     # Remplacer NoNewPrivileges par AmbientCapabilities (compatibilite setcap)
     if grep -q "NoNewPrivileges=yes" /etc/systemd/system/websec.service; then
@@ -401,10 +408,10 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     fi
     systemctl daemon-reload
 
-    # 8. Setup Apache (non-interactif) — migre les ports et met a jour websec.toml
+    # 9. Setup Apache (non-interactif) — migre les ports et met a jour websec.toml
     websec setup --noninteractive -c /etc/websec/websec.toml
 
-    # 9. Whitelist des IPs de confiance dans WebSec
+    # 10. Whitelist des IPs de confiance dans WebSec
     if [[ -n "${TRUSTED_IPS:-}" ]]; then
       for ip in $TRUSTED_IPS; do
         websec lists whitelist add "$ip" 2>/dev/null || true
@@ -414,7 +421,7 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     websec lists whitelist add "127.0.0.1" 2>/dev/null || true
     websec lists whitelist add "::1" 2>/dev/null || true
 
-    # 10. Demarrer
+    # 11. Demarrer
     systemctl enable --now websec
     systemctl reload apache2
 
