@@ -413,6 +413,20 @@ open(p,"w").write(t.replace(r":{from_port}(?=[^\d]|$)",r":{from_port}\b"))
     # 9. Setup Apache (non-interactif) — migre les ports et met a jour websec.toml
     websec setup --noninteractive -c /etc/websec/websec.toml
 
+    # 9b. Desactiver SSLEngine dans les vhosts Apache (WebSec gere le TLS)
+    for vhost in /etc/apache2/sites-available/*.conf; do
+      if grep -q ':8443' "$vhost" 2>/dev/null; then
+        sed -i '/SSLEngine/d' "$vhost"
+        sed -i '/SSLCertificate/d' "$vhost"
+      fi
+    done
+    apachectl configtest 2>/dev/null && systemctl reload apache2
+
+    # 9c. Seuils de reputation raisonnables (base_score=100, nouvelles IPs autorisees)
+    sed -i 's/threshold_allow = 70/threshold_allow = 50/' /etc/websec/websec.toml
+    sed -i 's/threshold_ratelimit = 40/threshold_ratelimit = 30/' /etc/websec/websec.toml
+    sed -i 's/threshold_challenge = 20/threshold_challenge = 10/' /etc/websec/websec.toml
+
     # 10. Whitelist des IPs de confiance dans WebSec
     if [[ -n "${TRUSTED_IPS:-}" ]]; then
       for ip in $TRUSTED_IPS; do
