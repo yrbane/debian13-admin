@@ -50,8 +50,18 @@ install_hostname() {
 }
 
 # ---- Exécution ----
-$INSTALL_LOCALES && install_locales
-install_hostname
+if $INSTALL_LOCALES && step_needed "base_locales"; then
+  install_locales
+  mark_done "base_locales"
+elif $INSTALL_LOCALES; then
+  log "base_locales (deja fait)"
+fi
+if step_needed "base_hostname"; then
+  install_hostname
+  mark_done "base_hostname"
+else
+  log "base_hostname (deja fait)"
+fi
 
 # ---------------------------------- 2) SSH durci --------------------------------------
 # Stratégie SSH :
@@ -65,7 +75,8 @@ install_hostname
 #     elles deviennent inutilisables (défense en profondeur)
 #   - LoginGraceTime=20s + MaxAuthTries=3 → limite l'exposition pendant l'auth
 if $INSTALL_SSH_HARDEN; then
-  section "SSH durci (clé uniquement) + port ${SSH_PORT}"
+  if step_needed "base_ssh"; then
+    section "SSH durci (clé uniquement) + port ${SSH_PORT}"
   apt_install openssh-server
   backup_file ${SSHD_CONFIG}
   cat >${SSHD_CONFIG} <<EOF
@@ -102,6 +113,10 @@ EOF
     > /root/.ssh/authorized_keys
     log "Clés SSH de root nettoyées (PermitRootLogin=no, clés inutiles)"
   fi
+    mark_done "base_ssh"
+  else
+    log "base_ssh (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 2b) Désactiver LLMNR/mDNS -------------------------
@@ -110,15 +125,20 @@ fi
 # Sur un serveur dédié, ils n'ont aucune utilité et offrent une surface d'attaque
 # supplémentaire (empoisonnement de noms, rebinding DNS). On les désactive via
 # un drop-in systemd-resolved (priorité 90 = après les réglages par défaut).
-section "Désactivation LLMNR/mDNS"
-mkdir -p "${RESOLVED_DROPIN_DIR}"
-cat > "${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf" <<'EOF'
+if step_needed "base_llmnr"; then
+  section "Désactivation LLMNR/mDNS"
+  mkdir -p "${RESOLVED_DROPIN_DIR}"
+  cat > "${RESOLVED_DROPIN_DIR}/90-no-llmnr.conf" <<'EOF'
 [Resolve]
 LLMNR=no
 MulticastDNS=no
 EOF
-systemctl restart systemd-resolved 2>/dev/null || true
-log "LLMNR et mDNS désactivés (port 5355 fermé)"
+  systemctl restart systemd-resolved 2>/dev/null || true
+  log "LLMNR et mDNS désactivés (port 5355 fermé)"
+  mark_done "base_llmnr"
+else
+  log "base_llmnr (deja fait)"
+fi
 
 # ---------------------------------- 3) UFW --------------------------------------------
 # Politique : deny-all par défaut + whitelist explicite des ports nécessaires.
@@ -129,20 +149,25 @@ log "LLMNR et mDNS désactivés (port 5355 fermé)"
 # seuls DNS (53), HTTP/HTTPS (80/443), SMTP (25/587), NTP (123) sont autorisés.
 # Cela empêche un processus compromis de communiquer avec un C2 sur un port exotique.
 if $INSTALL_UFW; then
-  section "Pare-feu UFW"
-  apt_install ufw
-  ufw default deny incoming
-  ufw default allow outgoing
-  ufw allow "${SSH_PORT}/tcp" comment "SSH"
-  ufw allow 80/tcp comment "HTTP"
-  ufw allow 443/tcp comment "HTTPS"
-  yes | ufw enable || true
-  ufw status verbose
-  log "UFW activé. Ports ouverts: ${SSH_PORT}/80/443."
+  if step_needed "base_ufw"; then
+    section "Pare-feu UFW"
+    apt_install ufw
+    ufw default deny incoming
+    ufw default allow outgoing
+    ufw allow "${SSH_PORT}/tcp" comment "SSH"
+    ufw allow 80/tcp comment "HTTP"
+    ufw allow 443/tcp comment "HTTPS"
+    yes | ufw enable || true
+    ufw status verbose
+    log "UFW activé. Ports ouverts: ${SSH_PORT}/80/443."
 
-  # Filtrage egress (optionnel)
-  if ${EGRESS_FILTER:-false}; then
-    deploy_egress_rules
+    # Filtrage egress (optionnel)
+    if ${EGRESS_FILTER:-false}; then
+      deploy_egress_rules
+    fi
+    mark_done "base_ufw"
+  else
+    log "base_ufw (deja fait)"
   fi
 fi
 
@@ -160,7 +185,8 @@ fi
 # Attention : ce blocage est géographique, pas chirurgical. Si vous avez des
 # utilisateurs légitimes dans ces zones, désactivez GEOIP_BLOCK dans le .conf.
 if $GEOIP_BLOCK && $INSTALL_UFW; then
-  section "Blocage GeoIP (${GEOIP_COUNTRY_COUNT} pays : Asie + Afrique)"
+  if step_needed "base_geoip"; then
+    section "Blocage GeoIP (${GEOIP_COUNTRY_COUNT} pays : Asie + Afrique)"
   apt_install ipset
 
   # Créer l'ipset s'il n'existe pas
@@ -223,6 +249,10 @@ CRONEOF
   # Recharger UFW
   ufw reload
   log "Blocage GeoIP activé. $(ipset list geoip_blocked | grep -c '^[0-9]' || true) plages bloquées."
+    mark_done "base_geoip"
+  else
+    log "base_geoip (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 4) Fail2ban ---------------------------------------
@@ -245,7 +275,8 @@ fi
 # Les TRUSTED_IPS sont exclues pour éviter de se bannir soi-même pendant le dev.
 # Le backend systemd (au lieu de polling) est plus efficace sur Debian 13.
 if $INSTALL_FAIL2BAN; then
-  section "Fail2ban"
+  if step_needed "base_fail2ban"; then
+    section "Fail2ban"
   apt_install fail2ban
   backup_file /etc/fail2ban/jail.local
 
@@ -345,4 +376,8 @@ FILTEREOF
   systemctl enable --now fail2ban
   fail2ban-client reload
   log "Fail2ban actif (SSH + filtres Apache + protection étendue)."
+    mark_done "base_fail2ban"
+  else
+    log "base_fail2ban (deja fait)"
+  fi
 fi

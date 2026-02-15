@@ -43,7 +43,7 @@ cleanup_tmpfiles() {
 # - EXIT : nettoyage garanti (s'exécute même sur exit 0, Ctrl-C ou erreur)
 # Ne pas combiner les deux dans un seul trap — le trap EXIT ne connaît pas
 # $LINENO du point d'erreur, et le trap ERR ne s'exécute pas sur exit normal.
-trap 'err "Erreur a la ligne $LINENO. Consulte le journal si necessaire."' ERR
+trap 'err "Erreur a la ligne $LINENO. Consulte le journal si necessaire."; err "Relancez le script pour reprendre a partir de la derniere etape reussie."' ERR
 trap 'cleanup_tmpfiles' EXIT
 
 # ---------------------------------- Prérequis -----------------------------------------
@@ -1200,4 +1200,56 @@ Résumé : <span class="ok">${CHECKS_OK:-0} OK</span> |
 <p><em>Généré le $(date '+%F %T')</em></p>
 </body></html>
 EOF
+}
+
+# ================================== CHECKPOINT / RESUME ===============================
+# Système de reprise après interruption. Un fichier texte .install-progress enregistre
+# chaque étape terminée. Au redémarrage, le script détecte le fichier et propose de
+# reprendre à la dernière étape réussie.
+PROGRESS_FILE="${SCRIPT_DIR:-.}/.install-progress"
+
+step_needed() {
+  [[ -f "$PROGRESS_FILE" ]] || return 0
+  grep -qxF "$1" "$PROGRESS_FILE" && return 1 || return 0
+}
+
+mark_done() {
+  if [[ ! -f "$PROGRESS_FILE" ]]; then
+    echo "# debian13-server progress" > "$PROGRESS_FILE"
+    echo "# started=$(date -Iseconds)" >> "$PROGRESS_FILE"
+    echo "# config_hash=$(config_hash)" >> "$PROGRESS_FILE"
+  fi
+  grep -qxF "$1" "$PROGRESS_FILE" 2>/dev/null || echo "$1" >> "$PROGRESS_FILE"
+}
+
+clear_progress() { rm -f "$PROGRESS_FILE"; }
+
+show_progress() {
+  [[ -f "$PROGRESS_FILE" ]] || return 0
+  local done=0
+  while IFS= read -r line; do
+    [[ "$line" == \#* || -z "$line" ]] && continue
+    ((done++)) || true
+  done < "$PROGRESS_FILE"
+  log "${done} etape(s) deja completee(s)."
+  if [[ "$done" -gt 0 ]]; then
+    note "Dernieres etapes terminees :"
+    grep -v '^#' "$PROGRESS_FILE" | grep -v '^$' | tail -5 | while read -r s; do
+      printf "  ${GREEN}✓${RESET} %s\n" "$s"
+    done || true
+  fi
+}
+
+config_hash() {
+  local h=""
+  for v in INSTALL_LOCALES INSTALL_SSH_HARDEN INSTALL_UFW GEOIP_BLOCK \
+           INSTALL_FAIL2BAN INSTALL_APACHE_PHP INSTALL_MARIADB INSTALL_PHPMYADMIN \
+           INSTALL_POSTFIX_DKIM INSTALL_CERTBOT INSTALL_DEVTOOLS INSTALL_NODE \
+           INSTALL_RUST INSTALL_PYTHON3 INSTALL_COMPOSER INSTALL_SYMFONY \
+           INSTALL_SHELL_FUN INSTALL_CLAMAV INSTALL_RKHUNTER INSTALL_LOGWATCH \
+           INSTALL_SSH_ALERT INSTALL_AIDE INSTALL_MODSEC_CRS INSTALL_APPARMOR \
+           INSTALL_AUDITD SECURE_TMP INSTALL_BASHRC_GLOBAL; do
+    h+="${v}=${!v:-};"
+  done
+  echo "$h" | md5sum | cut -c1-12
 }

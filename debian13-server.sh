@@ -109,6 +109,7 @@ show_help() {
   printf "  ${GREEN}--check-dns${RESET}               Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
   printf "  ${GREEN}--fix${RESET}                     Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
   printf "  ${GREEN}--dry-run${RESET}                 Simule les actions sans modifier le système.\n"
+  printf "  ${GREEN}--fresh${RESET}                   Ignorer la progression, recommencer de zero.\n"
   printf "  ${GREEN}--renew-ovh${RESET}               Regénérer les credentials API OVH (certificat wildcard).\n"
   printf "  ${GREEN}--help${RESET}, ${GREEN}-h${RESET}                Affiche cette aide.\n"
   printf "\n"
@@ -245,6 +246,7 @@ DOMAIN_IMPORT=""
 BACKUP_MODE=false
 BACKUP_LIST_MODE=false
 DRY_RUN=false
+FRESH_START=false
 DOMAIN_STAGING=""
 DOMAIN_PROMOTE=""
 DOMAIN_SET_GROUP=""
@@ -364,6 +366,7 @@ while [[ $# -gt 0 ]]; do
         shift; CLONE_PORT="$1"
       fi
       ;;
+    --fresh) FRESH_START=true ;;
     --help|-h) show_help; exit 0 ;;
     *) err "Option inconnue: $1"; show_help; exit 1 ;;
   esac
@@ -430,6 +433,7 @@ elif ! $NONINTERACTIVE; then
     section "Configuration existante détectée"
     load_config
     ask_missing_options
+    apply_config_defaults
     show_config
     echo ""
     if prompt_yes_no "Utiliser cette configuration ?" "y"; then
@@ -440,6 +444,7 @@ elif ! $NONINTERACTIVE; then
   else
     ask_all_questions
   fi
+  apply_config_defaults
 else
   if $PIPED_MODE && [[ -f "$CONFIG_FILE" ]]; then
     load_config
@@ -455,6 +460,31 @@ else
     EMAIL_FOR_CERTBOT="$EMAIL_FOR_CERTBOT_DEFAULT"
     TIMEZONE="$TIMEZONE_DEFAULT"
     apply_config_defaults
+  fi
+fi
+
+# ---------------------------------- Reprise apres interruption -------------------------
+if $FRESH_START; then
+  clear_progress
+  log "Mode --fresh : progression precedente effacee."
+elif [[ -f "$PROGRESS_FILE" ]] && ! $AUDIT_MODE; then
+  section "Progression precedente detectee"
+  show_progress
+  saved_hash=$(grep '^# config_hash=' "$PROGRESS_FILE" 2>/dev/null | cut -d= -f2)
+  current_hash=$(config_hash)
+  if [[ -n "$saved_hash" && "$saved_hash" != "$current_hash" ]]; then
+    warn "La configuration a change depuis la derniere execution."
+    warn "Certaines etapes ignorees pourraient devoir etre rejouees."
+  fi
+  if ! $NONINTERACTIVE; then
+    if tui_yesno "Reprendre depuis la derniere etape reussie ?" "Reprise"; then
+      log "Reprise de l'installation..."
+    else
+      clear_progress
+      log "Progression effacee — installation complete."
+    fi
+  else
+    log "Mode non-interactif : reprise automatique."
   fi
 fi
 
@@ -1178,7 +1208,12 @@ fi
 # ================================== INSTALLATION ======================================
 if ! $AUDIT_MODE; then
   run_hooks "pre-install"
-  apt_update_upgrade
+  if step_needed "main_apt_update"; then
+    apt_update_upgrade
+    mark_done "main_apt_update"
+  else
+    log "main_apt_update (deja fait)"
+  fi
 
   # shellcheck source=lib/install-base.sh
   source "${LIB_DIR}/install-base.sh"
@@ -1526,5 +1561,7 @@ if [[ -n "${AIDE_PID:-}" ]]; then
     warn "L'initialisation AIDE a échoué (exit code $?). Relancez 'aideinit' manuellement."
   fi
 fi
+
+clear_progress
 
 log "Terminé. Garde une session SSH ouverte tant que tu n'as pas validé la nouvelle connexion sur le port ${SSH_PORT}."

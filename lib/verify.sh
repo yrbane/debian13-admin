@@ -864,7 +864,7 @@ verify_files() {
   # World-writable in /var/www
   if $INSTALL_APACHE_PHP; then
     local ww_count
-    ww_count=$(find /var/www -type f -perm -002 2>/dev/null | wc -l)
+    ww_count=$(find /var/www -type f -perm -002 2>/dev/null | wc -l || true)
     if [[ "$ww_count" -eq 0 ]]; then
       emit_check ok "Web : pas de fichiers world-writable dans /var/www"
     else
@@ -882,7 +882,7 @@ verify_files() {
 
   # SUID
   local suid_count
-  suid_count=$(find /usr/local -type f -perm -4000 2>/dev/null | wc -l)
+  suid_count=$(find /usr/local -type f -perm -4000 2>/dev/null | wc -l || true)
   if [[ "$suid_count" -eq 0 ]]; then
     emit_check ok "SUID : pas de binaires SUID dans /usr/local"
   else
@@ -1350,7 +1350,7 @@ verify_suid_binaries() {
   emit_section "Binaires SUID/SGID"
 
   local count
-  count=$(find / -perm /6000 -type f 2>/dev/null | wc -l)
+  count=$(find / -perm /6000 -type f 2>/dev/null | wc -l || true)
   count=$(sanitize_int "$count")
 
   if [[ "$count" -le 20 ]]; then

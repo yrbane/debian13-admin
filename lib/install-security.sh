@@ -30,8 +30,9 @@
 # email si des fichiers suspects sont détectés. Les rapports au-delà de
 # CLAMAV_LOG_RETENTION_DAYS sont purgés automatiquement.
 if $INSTALL_CLAMAV; then
-  section "ClamAV"
-  apt_install clamav clamav-daemon mailutils cron
+  if step_needed "sec_clamav"; then
+    section "ClamAV"
+    apt_install clamav clamav-daemon mailutils cron
   systemctl enable --now cron || true
   systemctl stop clamav-freshclam || true
   freshclam || true
@@ -48,6 +49,10 @@ if $INSTALL_CLAMAV; then
   log "ClamAV opérationnel (signatures à jour si freshclam OK)."
   log "Script de scan quotidien : ${SCRIPTS_DIR}/clamav_scan.sh"
   log "Cron configuré : tous les jours à 2h00"
+    mark_done "sec_clamav"
+  else
+    log "sec_clamav (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14b) rkhunter -------------------------------------
@@ -60,7 +65,8 @@ fi
 # UPDATE_MIRRORS=0 + WEB_CMD="" = pas de mise à jour réseau automatique des signatures
 # (on utilise APT_AUTOGEN=true pour que les mises à jour apt régénèrent la base).
 if $INSTALL_RKHUNTER; then
-  section "rkhunter (détection rootkits)"
+  if step_needed "sec_rkhunter"; then
+    section "rkhunter (détection rootkits)"
   apt_install rkhunter
 
   backup_file /etc/rkhunter.conf
@@ -96,6 +102,10 @@ RKHCONF
     "__RKHUNTER_RETENTION__" "${RKHUNTER_LOG_RETENTION_DAYS}"
 
   log "rkhunter installé et configuré (scan hebdomadaire dimanche 3h00)"
+    mark_done "sec_rkhunter"
+  else
+    log "sec_rkhunter (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14c) Logwatch -------------------------------------
@@ -103,7 +113,8 @@ fi
 # HTML quotidien envoyé par email. Detail=Med est un bon compromis entre verbosité
 # et lisibilité. Range=yesterday couvre les dernières 24h (exécution via cron.daily).
 if $INSTALL_LOGWATCH; then
-  section "Logwatch (résumé quotidien des logs)"
+  if step_needed "sec_logwatch"; then
+    section "Logwatch (résumé quotidien des logs)"
   apt_install logwatch
 
   mkdir -p /etc/logwatch/conf
@@ -118,6 +129,10 @@ Output = mail
 LOGWATCHCONF
 
   log "Logwatch installé (rapport quotidien par email)"
+    mark_done "sec_logwatch"
+  else
+    log "sec_logwatch (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14d) SSH Login Alert ------------------------------
@@ -127,7 +142,8 @@ fi
 # La géolocalisation via ipinfo.io est best-effort (timeout 3s, pas bloquant).
 # L'email est envoyé en background (&) pour ne pas ralentir le login.
 if $INSTALL_SSH_ALERT; then
-  section "Alerte email connexion SSH"
+  if step_needed "sec_ssh_alert"; then
+    section "Alerte email connexion SSH"
 
   cat >/etc/profile.d/ssh-alert.sh <<'SSHALERT'
 #!/bin/bash
@@ -177,6 +193,10 @@ SSHALERT
   chmod +x /etc/profile.d/ssh-alert.sh
 
   log "Alerte SSH configurée (email à chaque connexion)"
+    mark_done "sec_ssh_alert"
+  else
+    log "sec_ssh_alert (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14e) AIDE ------------------------------------------
@@ -189,7 +209,8 @@ fi
 # positifs massifs — ces répertoires changent légitimement en permanence.
 # L'initialisation est lancée en background (&) car elle peut prendre 5-10 minutes.
 if $INSTALL_AIDE; then
-  section "AIDE (détection modifications fichiers)"
+  if step_needed "sec_aide"; then
+    section "AIDE (détection modifications fichiers)"
   apt_install aide
 
   cat >/etc/aide/aide.conf.d/99_local_excludes <<'AIDECONF'
@@ -226,6 +247,10 @@ AIDECONF
     "__AIDE_RETENTION__" "${AIDE_LOG_RETENTION_DAYS}"
 
   log "AIDE installé (vérification quotidienne 4h00, initialisation en cours...)"
+    mark_done "sec_aide"
+  else
+    log "sec_aide (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14f) ModSecurity OWASP CRS ------------------------
@@ -245,7 +270,8 @@ fi
 # block_hack.sh (cron horaire) parse le log d'audit ModSecurity et ajoute les IPs
 # récurrentes dans les règles UFW (ban permanent au niveau réseau).
 if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
-  section "ModSecurity OWASP Core Rule Set"
+  if step_needed "sec_modsecurity"; then
+    section "ModSecurity OWASP Core Rule Set"
 
   apt_install modsecurity-crs
 
@@ -306,6 +332,10 @@ MODSECCONF
     log "Pour activer le blocage : sed -i 's/SecRuleEngine DetectionOnly/SecRuleEngine On/' ${MODSEC_CONFIG} && systemctl restart apache2"
   fi
   log "block_hack.sh déployé (blocage IPs suspectes toutes les heures)"
+    mark_done "sec_modsecurity"
+  else
+    log "sec_modsecurity (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14g) AppArmor ------------------------------------
@@ -313,7 +343,8 @@ fi
 # Même si Apache est compromis, AppArmor limite ce que le processus peut lire/écrire/exécuter.
 # deploy_apparmor_profiles() crée des profils pour Apache, MariaDB et Postfix.
 if $INSTALL_APPARMOR; then
-  section "AppArmor"
+  if step_needed "sec_apparmor"; then
+    section "AppArmor"
   apt_install apparmor apparmor-utils
 
   systemctl enable --now apparmor || true
@@ -326,6 +357,10 @@ if $INSTALL_APPARMOR; then
   fi
 
   log "AppArmor activé avec profils locaux pour Apache, MariaDB et Postfix"
+    mark_done "sec_apparmor"
+  else
+    log "sec_apparmor (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14g2) auditd ------------------------------------
@@ -334,7 +369,8 @@ fi
 # l'analyse post-incident : "qui a fait quoi, quand, depuis quel processus".
 # Les règles de hardening surveillent /etc/passwd, /etc/shadow, les clés SSH, etc.
 if $INSTALL_AUDITD; then
-  section "auditd (audit de sécurité)"
+  if step_needed "sec_auditd"; then
+    section "auditd (audit de sécurité)"
   apt_install auditd audispd-plugins
 
   systemctl enable --now auditd || true
@@ -345,6 +381,10 @@ if $INSTALL_AUDITD; then
   augenrules --load 2>/dev/null || auditctl -R "${AUDIT_RULES_DIR:-/etc/audit/rules.d}/99-server-hardening.rules" 2>/dev/null || true
 
   log "auditd activé avec règles de hardening"
+    mark_done "sec_auditd"
+  else
+    log "sec_auditd (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14h) Secure /tmp ----------------------------------
@@ -355,7 +395,8 @@ fi
 # C'est un vecteur d'attaque classique : l'attaquant télécharge un payload dans
 # /tmp (world-writable), puis l'exécute. Avec noexec, l'exécution est bloquée par le kernel.
 if $SECURE_TMP; then
-  section "Sécurisation /tmp (noexec, nosuid, nodev)"
+  if step_needed "sec_secure_tmp"; then
+    section "Sécurisation /tmp (noexec, nosuid, nodev)"
 
   if mount | grep -q "on /tmp type"; then
     # Vérifier si /tmp est dans fstab et s'il a déjà noexec
@@ -393,6 +434,10 @@ if $SECURE_TMP; then
   fi
 
   log "/tmp et /var/tmp sécurisés"
+    mark_done "sec_secure_tmp"
+  else
+    log "sec_secure_tmp (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 14h) Durcissement sudo ----------------------------
@@ -400,8 +445,9 @@ fi
 # logfile : toutes les commandes sudo sont journalisées (utile pour l'audit).
 # secure_path : empêche l'injection de binaires via un PATH utilisateur modifié.
 # Le fichier est vérifié par visudo -c avant activation (si invalide → suppression).
-section "Durcissement sudo"
-cat > /etc/sudoers.d/99-hardening <<EOF
+if step_needed "sec_sudo"; then
+  section "Durcissement sudo"
+  cat > /etc/sudoers.d/99-hardening <<EOF
 # Timeout de session sudo (5 minutes)
 Defaults timestamp_timeout=5
 # Log des commandes sudo
@@ -409,12 +455,16 @@ Defaults logfile=${SUDO_LOG}
 # PATH sécurisé
 Defaults secure_path="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 EOF
-chmod 440 /etc/sudoers.d/99-hardening
-if visudo -c -f /etc/sudoers.d/99-hardening >/dev/null 2>&1; then
-  log "Durcissement sudo : timeout 5min, log dans ${SUDO_LOG}, secure_path"
+  chmod 440 /etc/sudoers.d/99-hardening
+  if visudo -c -f /etc/sudoers.d/99-hardening >/dev/null 2>&1; then
+    log "Durcissement sudo : timeout 5min, log dans ${SUDO_LOG}, secure_path"
+  else
+    err "Fichier sudoers invalide, suppression par sécurité"
+    rm -f /etc/sudoers.d/99-hardening
+  fi
+  mark_done "sec_sudo"
 else
-  err "Fichier sudoers invalide, suppression par sécurité"
-  rm -f /etc/sudoers.d/99-hardening
+  log "sec_sudo (deja fait)"
 fi
 
 # ---------------------------------- 15) Sysctl/journald/updates -----------------------
@@ -432,8 +482,9 @@ fi
 #   dmesg_restrict=1     → restreint l'accès au log kernel (informations sensibles)
 #   protected_hardlinks/symlinks=1 → protège contre les race conditions sur les liens
 #   suid_dumpable=0      → pas de core dump pour les binaires SUID (leak de données sensibles)
-section "Durcissements kernel et journald + MAJ auto sécurité"
-cat >/etc/sysctl.d/99-hardening.conf <<'EOF'
+if step_needed "sec_sysctl"; then
+  section "Durcissements kernel et journald + MAJ auto sécurité"
+  cat >/etc/sysctl.d/99-hardening.conf <<'EOF'
 # Réseau & durcissements
 net.ipv4.conf.all.rp_filter=1
 net.ipv4.conf.default.rp_filter=1
@@ -455,52 +506,57 @@ fs.protected_hardlinks=1
 fs.protected_symlinks=1
 fs.suid_dumpable=0
 EOF
-sysctl --system | tee -a "$LOG_FILE"
+  sysctl --system | tee -a "$LOG_FILE"
 
-# Désactiver le module USB storage — un serveur dédié n'a aucune raison d'accepter
-# des périphériques USB. Empêche l'exfiltration de données via clé USB (compliance).
-cat > /etc/modprobe.d/disable-usb-storage.conf <<'EOF'
+  # Désactiver le module USB storage — un serveur dédié n'a aucune raison d'accepter
+  # des périphériques USB. Empêche l'exfiltration de données via clé USB (compliance).
+  cat > /etc/modprobe.d/disable-usb-storage.conf <<'EOF'
 install usb-storage /bin/true
 EOF
-modprobe -r usb-storage 2>/dev/null || true
-log "Module usb-storage désactivé"
+  modprobe -r usb-storage 2>/dev/null || true
+  log "Module usb-storage désactivé"
 
-# Core dumps à 0
-add_line_if_missing '^\* .*hard .*core .*0$' '* hard core 0' /etc/security/limits.conf
-log "Core dumps désactivés dans limits.conf"
+  # Core dumps à 0
+  add_line_if_missing '^\* .*hard .*core .*0$' '* hard core 0' /etc/security/limits.conf
+  log "Core dumps désactivés dans limits.conf"
 
-# Umask 027 : les fichiers créés ne sont pas lisibles par "others" (rwxr-x---)
-# Essentiel pour éviter que les fichiers de config, logs, ou données soient
-# lisibles par tous les utilisateurs du système.
-if [[ -f /etc/login.defs ]]; then
-  if grep -q "^UMASK" /etc/login.defs; then
-    sed -i '/^UMASK/c\UMASK\t\t027' /etc/login.defs
-  else
-    printf 'UMASK\t\t027\n' >> /etc/login.defs
+  # Umask 027 : les fichiers créés ne sont pas lisibles par "others" (rwxr-x---)
+  # Essentiel pour éviter que les fichiers de config, logs, ou données soient
+  # lisibles par tous les utilisateurs du système.
+  if [[ -f /etc/login.defs ]]; then
+    if grep -q "^UMASK" /etc/login.defs; then
+      sed -i '/^UMASK/c\UMASK\t\t027' /etc/login.defs
+    else
+      printf 'UMASK\t\t027\n' >> /etc/login.defs
+    fi
+    log "Umask durci à 027 dans /etc/login.defs"
   fi
-  log "Umask durci à 027 dans /etc/login.defs"
+
+  sed -ri 's|^#?Storage=.*|Storage=persistent|' /etc/systemd/journald.conf
+  systemctl restart systemd-journald
+
+  apt_install unattended-upgrades
+  dpkg-reconfigure -f noninteractive unattended-upgrades
+
+  mkdir -p "${SCRIPTS_DIR}"
+  deploy_script "${SCRIPTS_DIR}/check-updates.sh" \
+    "$(cat "${SCRIPT_DIR}/templates/check-updates.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/check-updates.sh.template")" \
+    "${CRON_UPDATES}" \
+    "Vérification mises à jour hebdomadaire (lundi 7h00)"
+
+  log "Script check-updates.sh créé : ${SCRIPTS_DIR}/check-updates.sh"
+  log "Cron configuré : lundi à 7h00"
+  mark_done "sec_sysctl"
+else
+  log "sec_sysctl (deja fait)"
 fi
 
-sed -ri 's|^#?Storage=.*|Storage=persistent|' /etc/systemd/journald.conf
-systemctl restart systemd-journald
-
-apt_install unattended-upgrades
-dpkg-reconfigure -f noninteractive unattended-upgrades
-
-mkdir -p "${SCRIPTS_DIR}"
-deploy_script "${SCRIPTS_DIR}/check-updates.sh" \
-  "$(cat "${SCRIPT_DIR}/templates/check-updates.sh.template" 2>/dev/null || cat "${SCRIPTS_DIR}/templates/check-updates.sh.template")" \
-  "${CRON_UPDATES}" \
-  "Vérification mises à jour hebdomadaire (lundi 7h00)"
-
-log "Script check-updates.sh créé : ${SCRIPTS_DIR}/check-updates.sh"
-log "Cron configuré : lundi à 7h00"
-
 # ---------------------------------- 15b) Logrotate -----------------------------------
-section "Rotation des logs (logrotate)"
-apt_install logrotate
+if step_needed "sec_logrotate"; then
+  section "Rotation des logs (logrotate)"
+  apt_install logrotate
 
-cat > /etc/logrotate.d/custom-bootstrap <<'EOF'
+  cat > /etc/logrotate.d/custom-bootstrap <<'EOF'
 /var/log/sudo.log {
     weekly
     rotate 12
@@ -521,10 +577,10 @@ cat > /etc/logrotate.d/custom-bootstrap <<'EOF'
 }
 EOF
 
-log "Logrotate : rotation configurée pour sudo.log et bootstrap"
+  log "Logrotate : rotation configurée pour sudo.log et bootstrap"
 
-if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
-  cat > /etc/logrotate.d/modsecurity-audit <<'EOF'
+  if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
+    cat > /etc/logrotate.d/modsecurity-audit <<'EOF'
 /var/log/apache2/modsec_audit.log {
     daily
     rotate 14
@@ -538,13 +594,17 @@ if $INSTALL_MODSEC_CRS && $INSTALL_APACHE_PHP; then
     endscript
 }
 EOF
-  log "Logrotate : rotation quotidienne configurée pour modsec_audit.log"
-fi
+    log "Logrotate : rotation quotidienne configurée pour modsec_audit.log"
+  fi
 
-if logrotate --debug /etc/logrotate.d/custom-bootstrap > /dev/null 2>&1; then
-  log "Logrotate : test de configuration OK"
+  if logrotate --debug /etc/logrotate.d/custom-bootstrap > /dev/null 2>&1; then
+    log "Logrotate : test de configuration OK"
+  else
+    warn "Logrotate : erreur dans la configuration custom-bootstrap"
+  fi
+  mark_done "sec_logrotate"
 else
-  warn "Logrotate : erreur dans la configuration custom-bootstrap"
+  log "sec_logrotate (deja fait)"
 fi
 
 # ---------------------------------- 16) .bashrc global -------------------------------
@@ -553,7 +613,8 @@ fi
 # fonctions utilitaires (mkcd, extract, etc.). On vide /etc/motd et on désactive
 # update-motd.d pour que le .bashrc gère l'affichage au login (plus flexible).
 if $INSTALL_BASHRC_GLOBAL; then
-  section "Déploiement .bashrc (tous utilisateurs)"
+  if step_needed "sec_bashrc"; then
+    section "Déploiement .bashrc (tous utilisateurs)"
 
   BASHRC_TEMPLATE="${SCRIPT_DIR}/templates/bashrc.template"
   if [[ ! -f "$BASHRC_TEMPLATE" ]]; then
@@ -590,4 +651,8 @@ if $INSTALL_BASHRC_GLOBAL; then
 
   log ".bashrc déployé, /etc/motd vidé."
   fi # fin template check
+    mark_done "sec_bashrc"
+  else
+    log "sec_bashrc (deja fait)"
+  fi
 fi

@@ -25,8 +25,9 @@
 # mod_security2 = WAF (Web Application Firewall) basé sur les règles OWASP CRS.
 # mod_evasive = protection basique contre les requêtes répétitives (DDoS applicatif).
 if $INSTALL_APACHE_PHP; then
-  section "Apache + PHP"
-  apt_install apache2 apache2-utils
+  if step_needed "web_apache_php"; then
+    section "Apache + PHP"
+    apt_install apache2 apache2-utils
   systemctl enable --now apache2
   apt_install php php-cli php-fpm php-mysql php-curl php-xml php-gd php-mbstring php-zip php-intl php-opcache php-imagick imagemagick libapache2-mod-php
   apt_install libapache2-mod-security2 libapache2-mod-evasive
@@ -69,6 +70,10 @@ EOF
   done
   systemctl restart apache2
   log "Apache/PHP installés et durcis."
+    mark_done "web_apache_php"
+  else
+    log "web_apache_php (deja fait)"
+  fi
 
   # ---------------------------------- Pages d'erreur WebGL --------------------------------
   # Architecture des pages d'erreur :
@@ -85,9 +90,10 @@ EOF
   # Le throttle email (error-notify.php) empêche le flood : un seul email par code
   # d'erreur par tranche de ERROR_THROTTLE_SECONDS (défaut 5min), via un fichier
   # lock dans /tmp. Cela protège la boîte mail en cas de DDoS déclenchant des 503.
-  section "Pages d'erreur WebGL"
+  if step_needed "web_error_pages"; then
+    section "Pages d'erreur WebGL"
 
-  mkdir -p "${ERROR_PAGES_DIR}/css"
+    mkdir -p "${ERROR_PAGES_DIR}/css"
 
   # Fichier de configuration des IPs de confiance (pour debug)
   cat >"${ERROR_PAGES_DIR}/trusted-ips.php" <<'TRUSTEDIPS'
@@ -214,6 +220,10 @@ ERRORCONF
   find "${ERROR_PAGES_DIR}" -type f -name "*.css" -exec chmod 644 {} +
 
   log "Pages d'erreur WebGL installées dans ${ERROR_PAGES_DIR}/"
+    mark_done "web_error_pages"
+  else
+    log "web_error_pages (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 6) MariaDB ----------------------------------------
@@ -221,16 +231,21 @@ fi
 # de test, et flush des privilèges. Équivalent au mysql_secure_installation interactif,
 # mais scriptable et idempotent (les DELETE/DROP IF EXISTS ne cassent rien si déjà fait).
 if $INSTALL_MARIADB; then
-  section "MariaDB"
-  apt_install mariadb-server mariadb-client
-  systemctl enable --now mariadb
-  mysql --user=root <<'SQL'
+  if step_needed "web_mariadb"; then
+    section "MariaDB"
+    apt_install mariadb-server mariadb-client
+    systemctl enable --now mariadb
+    mysql --user=root <<'SQL'
 DELETE FROM mysql.user WHERE User='';
 DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';
 FLUSH PRIVILEGES;
 SQL
-  log "MariaDB installée (hardening de base)."
+    log "MariaDB installée (hardening de base)."
+    mark_done "web_mariadb"
+  else
+    log "web_mariadb (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 6b) phpMyAdmin --------------------------------------
@@ -243,7 +258,7 @@ fi
 if $INSTALL_PHPMYADMIN; then
   if ! $INSTALL_MARIADB || ! $INSTALL_APACHE_PHP; then
     warn "phpMyAdmin nécessite MariaDB et Apache/PHP. Installation ignorée."
-  else
+  elif step_needed "web_phpmyadmin"; then
     section "phpMyAdmin"
 
     # Préconfiguration pour éviter les questions interactives
@@ -297,6 +312,9 @@ PMASEC
     # Sauvegarder l'alias dans un fichier pour référence (lecture root uniquement)
     echo "${PMA_ALIAS}" > /root/.phpmyadmin_alias
     chmod 600 /root/.phpmyadmin_alias
+    mark_done "web_phpmyadmin"
+  else
+    log "web_phpmyadmin (deja fait)"
   fi
 fi
 
@@ -318,7 +336,8 @@ fi
 # Le milter protocol 6 (postconf milter_protocol=6) est la version la plus récente,
 # supportant les headers étendus et la gestion des erreurs améliorée.
 if $INSTALL_POSTFIX_DKIM; then
-  section "Postfix (send-only) + OpenDKIM"
+  if step_needed "web_postfix_dkim"; then
+    section "Postfix (send-only) + OpenDKIM"
   echo "postfix postfix/mailname string ${DKIM_DOMAIN}" | debconf-set-selections
   echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
   apt_install postfix opendkim opendkim-tools
@@ -340,7 +359,7 @@ if $INSTALL_POSTFIX_DKIM; then
 
   adduser opendkim postfix || true
   mkdir -p /etc/opendkim/{keys,conf.d,domains}
-  local dm_keydir="${DKIM_KEYDIR_BASE}/${DKIM_DOMAIN}"
+  dm_keydir="${DKIM_KEYDIR_BASE}/${DKIM_DOMAIN}"
   mkdir -p "$dm_keydir"
   chown -R opendkim:opendkim /etc/opendkim
   chmod -R go-rwx /etc/opendkim
@@ -348,8 +367,8 @@ if $INSTALL_POSTFIX_DKIM; then
   # Migration de layout DKIM : avant le multi-domaines, les clés étaient stockées à plat
   # dans keys/{selector}.private. Le nouveau layout keys/{domain}/{selector}.private
   # permet de gérer N domaines sur le même serveur sans collision de noms.
-  local old_key="${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.private"
-  local new_key="${dm_keydir}/${DKIM_SELECTOR}.private"
+  old_key="${DKIM_KEYDIR_BASE}/${DKIM_SELECTOR}.private"
+  new_key="${dm_keydir}/${DKIM_SELECTOR}.private"
   if [[ -f "$old_key" && ! -f "$new_key" ]]; then
     log "Migration DKIM: ${old_key} -> ${new_key}"
     mv "$old_key" "$new_key"
@@ -405,6 +424,10 @@ EOF
   systemctl enable --now opendkim
   systemctl restart postfix
   note "Vérifier DKIM: opendkim-testkey -d ${DKIM_DOMAIN} -s ${DKIM_SELECTOR} -x /etc/opendkim.conf"
+    mark_done "web_postfix_dkim"
+  else
+    log "web_postfix_dkim (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 8) Certbot ----------------------------------------
@@ -424,7 +447,8 @@ fi
 # Le hook de renouvellement (renewal-hooks/deploy/) recharge Apache automatiquement
 # après chaque renouvellement, évitant un cert expiré en production.
 if $INSTALL_CERTBOT; then
-  section "Certbot (Let's Encrypt)"
+  if step_needed "web_certbot"; then
+    section "Certbot (Let's Encrypt)"
   apt_install certbot python3-certbot-apache
 
   # --- Mode wildcard via DNS OVH ---
@@ -538,6 +562,10 @@ RENEWHOOK
   fi
 
   log "Certbot installé avec hook de renouvellement Apache."
+    mark_done "web_certbot"
+  else
+    log "web_certbot (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 8b) VirtualHost + Parking ----------------------------
@@ -557,7 +585,8 @@ fi
 # que le domaine est correctement configuré. robots.txt Disallow:/ empêche
 # l'indexation pendant que le site n'est pas encore déployé.
 if $INSTALL_APACHE_PHP; then
-  section "VirtualHost HTTPS + Page de parking"
+  if step_needed "web_vhosts"; then
+    section "VirtualHost HTTPS + Page de parking"
 
   # Page de parking + robots.txt (via domain-manager)
   dm_deploy_parking "${HOSTNAME_FQDN}"
@@ -603,6 +632,10 @@ if $INSTALL_APACHE_PHP; then
 
   # Logrotate (via domain-manager)
   dm_deploy_logrotate "${HOSTNAME_FQDN}"
+    mark_done "web_vhosts"
+  else
+    log "web_vhosts (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 9) DNS auto-config (SPF/DKIM/DMARC) ----------------
@@ -617,7 +650,8 @@ fi
 # La fonction dm_setup_dns() gère aussi les enregistrements A, AAAA et www.
 # Tous les appels API OVH sont idempotents (upsert : update si existe, create sinon).
 if $INSTALL_POSTFIX_DKIM && [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
-  section "Configuration DNS automatique (SPF/DKIM/DMARC)"
+  if step_needed "web_dns_config"; then
+    section "Configuration DNS automatique (SPF/DKIM/DMARC)"
   log "Credentials OVH détectés — vérification de l'accès API..."
 
   if ! ovh_test_credentials 2>/dev/null; then
@@ -644,5 +678,9 @@ if $INSTALL_POSTFIX_DKIM && [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
   if command -v mail >/dev/null 2>&1; then
     section "Test de délivrabilité email"
     ovh_test_mail "${EMAIL_FOR_CERTBOT}" "${HOSTNAME_FQDN}" || true
+  fi
+    mark_done "web_dns_config"
+  else
+    log "web_dns_config (deja fait)"
   fi
 fi

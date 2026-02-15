@@ -4,13 +4,19 @@
 
 # ---------------------------------- 9) Dev tools --------------------------------------
 if $INSTALL_DEVTOOLS; then
-  section "Outils dev (Git/Curl/build-essential/grc)"
-  apt_install git curl build-essential pkg-config dnsutils grc
+  if step_needed "dev_tools"; then
+    section "Outils dev (Git/Curl/build-essential/grc)"
+    apt_install git curl build-essential pkg-config dnsutils grc
+    mark_done "dev_tools"
+  else
+    log "dev_tools (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 10) Node (nvm) ------------------------------------
 if $INSTALL_NODE; then
-  section "Node.js via nvm (LTS) pour ${ADMIN_USER}"
+  if step_needed "dev_nodejs"; then
+    section "Node.js via nvm (LTS) pour ${ADMIN_USER}"
 
 
   # Installation de nvm pour l'utilisateur admin (download then execute)
@@ -38,11 +44,16 @@ if $INSTALL_NODE; then
     [[ -n "$NPX_PATH" ]] && ln -sf "$NPX_PATH" /usr/local/bin/npx || true
   fi
   log "Node LTS installé pour ${ADMIN_USER}."
+    mark_done "dev_nodejs"
+  else
+    log "dev_nodejs (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 11) Rust ------------------------------------------
 if $INSTALL_RUST; then
-  section "Rust (rustup stable) pour ${ADMIN_USER}"
+  if step_needed "dev_rust"; then
+    section "Rust (rustup stable) pour ${ADMIN_USER}"
 
 
   # Vérifie si rustup est déjà installé pour l'utilisateur
@@ -63,11 +74,16 @@ if $INSTALL_RUST; then
     ln -sf "${USER_HOME}/.cargo/bin/cargo" /usr/local/bin/cargo || true
   fi
   log "Rust installé pour ${ADMIN_USER}."
+    mark_done "dev_rust"
+  else
+    log "dev_rust (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 11b) Python 3 --------------------------------------
 if $INSTALL_PYTHON3; then
-  section "Python 3 + pip + venv + pipx"
+  if step_needed "dev_python3"; then
+    section "Python 3 + pip + venv + pipx"
 
   # Installation des paquets Python (pipx via apt pour respecter PEP 668)
   apt_install python3 python3-pip python3-venv python3-dev python3-setuptools python3-wheel python3-full pipx
@@ -88,11 +104,16 @@ if $INSTALL_PYTHON3; then
   pipx --version || true
 
   log "Python 3 + pip + venv + pipx installé."
+    mark_done "dev_python3"
+  else
+    log "dev_python3 (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 12) Composer --------------------------------------
 if $INSTALL_COMPOSER; then
-  section "Composer pour ${ADMIN_USER}"
+  if step_needed "dev_composer"; then
+    section "Composer pour ${ADMIN_USER}"
 
 
   # Crée le répertoire bin local si nécessaire
@@ -128,11 +149,16 @@ if $INSTALL_COMPOSER; then
 
   run_as_user "composer --version" || true
   log "Composer installé pour ${ADMIN_USER}."
+    mark_done "dev_composer"
+  else
+    log "dev_composer (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 12b) Symfony CLI -----------------------------------
 if $INSTALL_SYMFONY; then
-  section "Symfony CLI et dépendances"
+  if step_needed "dev_symfony"; then
+    section "Symfony CLI et dépendances"
 
 
   # Extensions PHP supplémentaires pour Symfony
@@ -158,11 +184,16 @@ if $INSTALL_SYMFONY; then
   # Vérifier l'installation
   symfony version || true
   log "Symfony CLI et dépendances installés."
+    mark_done "dev_symfony"
+  else
+    log "dev_symfony (deja fait)"
+  fi
 fi
 
 # ---------------------------------- 13) Shell fun & utils -----------------------------
 if $INSTALL_SHELL_FUN; then
-  section "Confort shell (fastfetch, toilet, fortune-mod, cowsay, lolcat, grc, archives, beep)"
+  if step_needed "dev_shell_fun"; then
+    section "Confort shell (fastfetch, toilet, fortune-mod, cowsay, lolcat, grc, archives, beep)"
   # fastfetch remplace neofetch (abandonné), unrar-free remplace unrar (non-free)
   apt_install fastfetch toilet figlet fortune-mod cowsay lolcat grc p7zip-full zip unzip beep || true
   # unrar-free en fallback (peut ne pas être dispo)
@@ -175,4 +206,8 @@ if $INSTALL_SHELL_FUN; then
     apt-get install -y yt-dlp || apt-get install -y youtube-dl || true
   fi
   log "Outils de confort installés."
+    mark_done "dev_shell_fun"
+  else
+    log "dev_shell_fun (deja fait)"
+  fi
 fi
