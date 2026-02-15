@@ -242,7 +242,7 @@ GEOIPSCRIPT
   cat > /etc/cron.weekly/geoip-update << 'CRONEOF'
 #!/bin/bash
 /usr/local/bin/geoip-update.sh >> /var/log/geoip-update.log 2>&1
-ufw reload
+ufw reload >> /var/log/geoip-update.log 2>&1
 CRONEOF
   chmod +x /etc/cron.weekly/geoip-update
 

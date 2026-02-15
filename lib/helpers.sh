@@ -920,6 +920,114 @@ f2b_banned() {
   fail2ban-client status "$1" 2>/dev/null | grep "Currently banned" | awk '{print $NF}' || echo "0"
 }
 
+# WebSec metrics
+get_websec_json() {
+  if ! command -v websec >/dev/null 2>&1; then
+    echo '"websec": {"status": "not_installed", "requests_total": 0, "requests_blocked": 0, "threats": {"sqli": 0, "xss": 0, "bot": 0, "scan": 0, "bruteforce": 0}, "whitelist_count": 0, "blacklist_count": 0, "uptime": "N/A"}'
+    return
+  fi
+  local ws_status="stopped"
+  if systemctl is-active --quiet websec 2>/dev/null; then
+    ws_status="running"
+  fi
+  local req_total=0 req_blocked=0
+  local sqli=0 xss=0 bot=0 scan=0 bruteforce=0
+  local wl_count=0 bl_count=0 ws_uptime="N/A"
+  local metrics
+  metrics=$(curl -s --max-time 2 http://localhost:9090/metrics 2>/dev/null)
+  if [[ -n "$metrics" ]]; then
+    req_total=$(echo "$metrics" | grep -m1 '^websec_requests_total ' | awk '{print int($2)}')
+    req_blocked=$(echo "$metrics" | grep -m1 '^websec_requests_blocked ' | awk '{print int($2)}')
+    sqli=$(echo "$metrics" | grep 'type="sqli"' | awk '{print int($2)}')
+    xss=$(echo "$metrics" | grep 'type="xss"' | awk '{print int($2)}')
+    bot=$(echo "$metrics" | grep 'type="bot"' | awk '{print int($2)}')
+    scan=$(echo "$metrics" | grep 'type="scan"' | awk '{print int($2)}')
+    bruteforce=$(echo "$metrics" | grep 'type="bruteforce"' | awk '{print int($2)}')
+  fi
+  local stats
+  stats=$(websec stats 2>/dev/null)
+  if [[ -n "$stats" ]]; then
+    [[ "$req_total" -eq 0 ]] && req_total=$(echo "$stats" | grep -i 'total' | grep -oP '\d+' | head -1)
+    [[ "$req_blocked" -eq 0 ]] && req_blocked=$(echo "$stats" | grep -i 'blocked' | grep -oP '\d+' | head -1)
+    wl_count=$(echo "$stats" | grep -i 'whitelist' | grep -oP '\d+' | head -1)
+    bl_count=$(echo "$stats" | grep -i 'blacklist' | grep -oP '\d+' | head -1)
+    ws_uptime=$(echo "$stats" | grep -i 'uptime' | sed 's/.*: *//')
+  fi
+  req_total=${req_total:-0}; req_blocked=${req_blocked:-0}
+  sqli=${sqli:-0}; xss=${xss:-0}; bot=${bot:-0}; scan=${scan:-0}; bruteforce=${bruteforce:-0}
+  wl_count=${wl_count:-0}; bl_count=${bl_count:-0}; ws_uptime=${ws_uptime:-N/A}
+  echo "\"websec\": {\"status\": \"${ws_status}\", \"requests_total\": ${req_total}, \"requests_blocked\": ${req_blocked}, \"threats\": {\"sqli\": ${sqli}, \"xss\": ${xss}, \"bot\": ${bot}, \"scan\": ${scan}, \"bruteforce\": ${bruteforce}}, \"whitelist_count\": ${wl_count}, \"blacklist_count\": ${bl_count}, \"uptime\": \"${ws_uptime}\"}"
+}
+
+# Security metrics
+get_security_json() {
+  local aa_enforced=0 aa_profiles=0
+  if command -v aa-status >/dev/null 2>&1; then
+    aa_profiles=$(aa-status --json 2>/dev/null | grep -oP '"profiles":\s*\{\s*[^}]*' | tr ',' '\n' | wc -l 2>/dev/null || aa-status 2>/dev/null | grep 'profiles are loaded' | awk '{print $1}' || echo 0)
+    aa_enforced=$(aa-status --json 2>/dev/null | grep -oP '"enforce":\s*\d+' | grep -oP '\d+' || aa-status 2>/dev/null | grep 'profiles are in enforce' | awk '{print $1}' || echo 0)
+  fi
+  aa_enforced=${aa_enforced:-0}; aa_profiles=${aa_profiles:-0}
+  local auditd_alerts=0
+  if command -v ausearch >/dev/null 2>&1; then
+    auditd_alerts=$(ausearch -ts today --raw 2>/dev/null | wc -l || echo 0)
+  fi
+  local clam_date="N/A" clam_threats=0
+  local clam_log="/var/log/clamav/clamav.log"
+  if [[ -f "$clam_log" ]]; then
+    clam_date=$(grep -oP '\d{4}-\d{2}-\d{2}' "$clam_log" 2>/dev/null | tail -1 || echo "N/A")
+    clam_threats=$(grep -c 'FOUND$' "$clam_log" 2>/dev/null || echo 0)
+  fi
+  local rkh_warnings=0
+  local rkh_log="/var/log/rkhunter.log"
+  if [[ -f "$rkh_log" ]]; then
+    rkh_warnings=$(grep -c 'Warning:' "$rkh_log" 2>/dev/null || echo 0)
+  fi
+  echo "\"security\": {\"apparmor_enforced\": ${aa_enforced}, \"apparmor_profiles\": ${aa_profiles}, \"auditd_alerts_24h\": ${auditd_alerts}, \"clamav_last_scan\": \"${clam_date}\", \"clamav_threats\": ${clam_threats}, \"rkhunter_warnings\": ${rkh_warnings}}"
+}
+
+# Network connections
+get_network_json() {
+  local established=0 listening=0
+  established=$(ss -tun state established 2>/dev/null | tail -n +2 | wc -l || echo 0)
+  listening=$(ss -tlun 2>/dev/null | tail -n +2 | wc -l || echo 0)
+  local top_ips
+  top_ips=$(ss -tun state established 2>/dev/null | tail -n +2 | awk '{print $5}' | rev | cut -d: -f2- | rev | sed 's/^\[//;s/\]$//' | sort | uniq -c | sort -rn | head -5)
+  local top_json=""
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local cnt ip
+    cnt=$(echo "$line" | awk '{print $1}')
+    ip=$(echo "$line" | awk '{print $2}')
+    [[ -z "$ip" ]] && continue
+    [[ -n "$top_json" ]] && top_json+=","
+    top_json+="{\"ip\":\"${ip}\",\"count\":${cnt}}"
+  done <<< "$top_ips"
+  echo "\"network\": {\"established\": ${established}, \"listening_ports\": ${listening}, \"top_connections\": [${top_json}]}"
+}
+
+# Recent alerts
+get_alerts_json() {
+  local alerts_json=""
+  local lines
+  lines=$(journalctl -u fail2ban -u websec --since "-1 hour" --no-pager -q -o short 2>/dev/null | tail -5)
+  while IFS= read -r line; do
+    [[ -z "$line" ]] && continue
+    local ts msg atype
+    ts=$(echo "$line" | awk '{print $3}')
+    if echo "$line" | grep -qi 'fail2ban'; then
+      atype="fail2ban"
+    elif echo "$line" | grep -qi 'websec'; then
+      atype="websec"
+    else
+      atype="system"
+    fi
+    msg=$(echo "$line" | sed 's/^[^ ]* [^ ]* [^ ]* [^ ]* //' | sed 's/"/\\"/g' | cut -c1-120)
+    [[ -n "$alerts_json" ]] && alerts_json+=","
+    alerts_json+="{\"time\":\"${ts}\",\"type\":\"${atype}\",\"msg\":\"${msg}\"}"
+  done <<< "$lines"
+  echo "\"recent_alerts\": [${alerts_json}]"
+}
+
 HOSTNAME_FQDN="$(hostname -f 2>/dev/null || echo unknown)"
 
 cat <<JSON
@@ -946,7 +1054,8 @@ cat <<JSON
     "mariadb": "$(svc_status mariadb)",
     "fail2ban": "$(svc_status fail2ban)",
     "ufw": "$(svc_status ufw)",
-    "clamav": "$(svc_status clamav-daemon)"
+    "clamav": "$(svc_status clamav-daemon)",
+    "websec": "$(svc_status websec)"
   },
   "ssl": {
     "days_remaining": "$(ssl_days "${HOSTNAME_FQDN}")"
@@ -955,7 +1064,11 @@ cat <<JSON
     "sshd_banned": "$(f2b_banned sshd)",
     "recidive_banned": "$(f2b_banned recidive)"
   },
-  "postfix_queue": $(mailq 2>/dev/null | tail -1 | grep -oP '\d+' | head -1 || echo 0)
+  "postfix_queue": $(mailq 2>/dev/null | tail -1 | grep -oP '\d+' | head -1 || echo 0),
+  $(get_websec_json),
+  $(get_security_json),
+  $(get_network_json),
+  $(get_alerts_json)
 }
 JSON
 APICGI
@@ -970,78 +1083,200 @@ APICGI
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Dashboard — ${domain}</title>
 <style>
+:root{--bg:#0a1628;--card:#142136;--card-border:rgba(107,219,219,0.08);--accent:#dc5c3b;--cyan:#6bdbdb;--ok:#2dd4bf;--warn:#fbbf24;--crit:#f87171;--text:#e0e0e0;--muted:#7a8ba5}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#0a0a1a;color:#e0e0e0;min-height:100vh}
-.header{background:linear-gradient(135deg,#0d1b2a,#1b2838);padding:1.5em 2em;border-bottom:1px solid #1e3a5f}
-.header h1{font-size:1.4em;color:#6bdbdb}
-.header .ts{font-size:.85em;color:#888;margin-top:4px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1em;padding:1.5em}
-.card{background:#111827;border:1px solid #1e3a5f;border-radius:12px;padding:1.2em}
-.card h2{font-size:1em;color:#6bdbdb;margin-bottom:.8em;text-transform:uppercase;letter-spacing:1px}
-.metric{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid #1a2332}
-.metric:last-child{border-bottom:none}
-.metric .label{color:#999}.metric .value{font-weight:600}
-.ok{color:#2dd4bf}.warn{color:#fbbf24}.crit{color:#f87171}.stopped{color:#f87171}
-.running{color:#2dd4bf}
-.bar{background:#1a2332;border-radius:4px;height:8px;margin-top:4px}
-.bar-fill{height:100%;border-radius:4px;transition:width .5s}
-.refresh-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:8px;background:#2dd4bf;animation:pulse 2s infinite}
+body{font-family:'Segoe UI',system-ui,-apple-system,sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.header{background:linear-gradient(135deg,#0d1b2a 0%,#142136 100%);padding:1.2em 2em;border-bottom:1px solid var(--card-border);display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:.8em}
+.header-left{display:flex;align-items:center;gap:1em}
+.logo{font-size:1.6em;font-weight:700;color:var(--accent);letter-spacing:-0.5px}
+.header-title{font-size:1.1em;color:var(--cyan);font-weight:600}
+.header-right{display:flex;align-items:center;gap:1.5em;font-size:.85em;color:var(--muted)}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--ok);display:inline-block;animation:pulse 2s infinite;margin-right:4px}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:1em;padding:1.5em}
+@media(max-width:1024px){.grid{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:640px){.grid{grid-template-columns:1fr;padding:1em}}
+.card{background:var(--card);border:1px solid var(--card-border);border-radius:12px;padding:1.2em;transition:border-color .3s}
+.card:hover{border-color:rgba(107,219,219,0.2)}
+.card h2{font-size:.85em;color:var(--cyan);margin-bottom:.8em;text-transform:uppercase;letter-spacing:1.5px;display:flex;align-items:center;gap:.5em}
+.card h2 .icon{font-size:1.1em}
+.metric{display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid rgba(107,219,219,0.05)}
+.metric:last-child{border-bottom:none}
+.metric .label{color:var(--muted);font-size:.9em}
+.metric .value{font-weight:600;font-size:.9em}
+.badge{display:inline-block;padding:2px 10px;border-radius:20px;font-size:.8em;font-weight:600}
+.badge-ok{background:rgba(45,212,191,0.15);color:var(--ok)}
+.badge-warn{background:rgba(251,191,36,0.15);color:var(--warn)}
+.badge-crit{background:rgba(248,113,113,0.15);color:var(--crit)}
+.badge-off{background:rgba(122,139,165,0.15);color:var(--muted)}
+.ok{color:var(--ok)}.warn{color:var(--warn)}.crit{color:var(--crit)}
+.running{color:var(--ok)}.stopped{color:var(--crit)}
+.bar{background:rgba(107,219,219,0.08);border-radius:6px;height:8px;margin-top:6px;overflow:hidden}
+.bar-fill{height:100%;border-radius:6px;transition:width .6s ease}
+.threat-row{display:flex;gap:.5em;flex-wrap:wrap;margin-top:.5em}
+.threat-tag{font-size:.75em;padding:3px 8px;border-radius:12px;background:rgba(220,92,59,0.12);color:var(--accent);font-weight:600}
+.alert-list{max-height:180px;overflow-y:auto;scrollbar-width:thin;scrollbar-color:var(--card-border) transparent}
+.alert-item{padding:6px 0;border-bottom:1px solid rgba(107,219,219,0.05);font-size:.85em}
+.alert-item:last-child{border-bottom:none}
+.alert-time{color:var(--cyan);font-weight:600;margin-right:.5em}
+.alert-type{font-size:.75em;padding:1px 6px;border-radius:8px;margin-right:.5em;font-weight:600}
+.alert-type-fail2ban{background:rgba(251,191,36,0.15);color:var(--warn)}
+.alert-type-websec{background:rgba(220,92,59,0.15);color:var(--accent)}
+.alert-type-system{background:rgba(107,219,219,0.15);color:var(--cyan)}
+.top-ip{display:flex;justify-content:space-between;align-items:center;padding:4px 0;font-size:.85em}
+.top-ip .ip{color:var(--text);font-family:monospace}.top-ip .cnt{color:var(--cyan);font-weight:600}
+.empty{color:var(--muted);font-style:italic;font-size:.85em;padding:8px 0}
 </style>
 </head>
 <body>
 <div class="header">
-  <h1>${domain} <span class="refresh-dot"></span></h1>
-  <div class="ts" id="ts">Chargement...</div>
+  <div class="header-left">
+    <span class="logo">Debian</span>
+    <span class="header-title" id="hname">${domain}</span>
+  </div>
+  <div class="header-right">
+    <span><span class="live-dot"></span> Live</span>
+    <span id="huptime"></span>
+    <span id="htime"></span>
+  </div>
 </div>
 <div class="grid" id="grid"></div>
 <script>
 const API='api.cgi';
 function pct(u,t){return t>0?Math.round(u/t*100):0}
-function svcClass(s){return s==='running'?'running':'stopped'}
+function badge(status){
+  if(status==='running') return '<span class="badge badge-ok">running</span>';
+  if(status==='stopped') return '<span class="badge badge-crit">stopped</span>';
+  if(status==='not_installed') return '<span class="badge badge-off">non install\\u00e9</span>';
+  return '<span class="badge badge-warn">'+status+'</span>';
+}
+function barColor(p){return p>85?'var(--crit)':p>70?'var(--warn)':'var(--ok)'}
 function render(d){
-  document.getElementById('ts').textContent='Mis à jour : '+d.timestamp+' | Uptime : '+d.uptime;
+  document.getElementById('hname').textContent=d.hostname;
+  document.getElementById('huptime').textContent=d.uptime;
+  document.getElementById('htime').textContent=new Date(d.timestamp).toLocaleTimeString('fr-FR');
   const memPct=pct(d.memory.used_mb,d.memory.total_mb);
   const diskPct=parseInt(d.disk.used)||0;
-  let html='';
+  let h='';
+
   // System
-  html+='<div class="card"><h2>Système</h2>';
-  html+='<div class="metric"><span class="label">Hostname</span><span class="value">'+d.hostname+'</span></div>';
-  html+='<div class="metric"><span class="label">Load</span><span class="value">'+d.load+'</span></div>';
-  html+='<div class="metric"><span class="label">CPUs</span><span class="value">'+d.cpu_count+'</span></div>';
-  html+='</div>';
+  h+='<div class="card"><h2><span class="icon">&#9881;</span> Syst\\u00e8me</h2>';
+  h+='<div class="metric"><span class="label">Load</span><span class="value">'+d.load+'</span></div>';
+  h+='<div class="metric"><span class="label">CPUs</span><span class="value">'+d.cpu_count+'</span></div>';
+  h+='</div>';
+
   // Memory
-  html+='<div class="card"><h2>Mémoire</h2>';
-  html+='<div class="metric"><span class="label">Utilisée</span><span class="value '+(memPct>85?'crit':memPct>70?'warn':'ok')+'">'+d.memory.used_mb+'/'+d.memory.total_mb+' MB ('+memPct+'%)</span></div>';
-  html+='<div class="bar"><div class="bar-fill" style="width:'+memPct+'%;background:'+(memPct>85?'#f87171':memPct>70?'#fbbf24':'#2dd4bf')+'"></div></div>';
-  html+='</div>';
+  h+='<div class="card"><h2><span class="icon">&#128204;</span> M\\u00e9moire</h2>';
+  h+='<div class="metric"><span class="label">Utilis\\u00e9e</span><span class="value" style="color:'+barColor(memPct)+'">'+d.memory.used_mb+' / '+d.memory.total_mb+' MB ('+memPct+'%)</span></div>';
+  h+='<div class="bar"><div class="bar-fill" style="width:'+memPct+'%;background:'+barColor(memPct)+'"></div></div>';
+  h+='<div class="metric"><span class="label">Disponible</span><span class="value">'+d.memory.available_mb+' MB</span></div>';
+  h+='</div>';
+
   // Disk
-  html+='<div class="card"><h2>Disque</h2>';
-  html+='<div class="metric"><span class="label">Utilisé</span><span class="value '+(diskPct>90?'crit':diskPct>75?'warn':'ok')+'">'+d.disk.used+' de '+d.disk.total+'</span></div>';
-  html+='<div class="bar"><div class="bar-fill" style="width:'+diskPct+'%;background:'+(diskPct>90?'#f87171':diskPct>75?'#fbbf24':'#2dd4bf')+'"></div></div>';
-  html+='<div class="metric"><span class="label">Disponible</span><span class="value">'+d.disk.avail+'</span></div>';
-  html+='</div>';
+  h+='<div class="card"><h2><span class="icon">&#128190;</span> Disque</h2>';
+  h+='<div class="metric"><span class="label">Utilis\\u00e9</span><span class="value" style="color:'+barColor(diskPct)+'">'+d.disk.used+' de '+d.disk.total+'</span></div>';
+  h+='<div class="bar"><div class="bar-fill" style="width:'+diskPct+'%;background:'+barColor(diskPct)+'"></div></div>';
+  h+='<div class="metric"><span class="label">Disponible</span><span class="value">'+d.disk.avail+'</span></div>';
+  h+='</div>';
+
   // Services
-  html+='<div class="card"><h2>Services</h2>';
+  h+='<div class="card"><h2><span class="icon">&#9889;</span> Services</h2>';
   for(const[k,v]of Object.entries(d.services)){
-    html+='<div class="metric"><span class="label">'+k+'</span><span class="value '+svcClass(v)+'">'+v+'</span></div>';
+    h+='<div class="metric"><span class="label">'+k+'</span>'+badge(v)+'</div>';
   }
-  html+='</div>';
+  h+='</div>';
+
   // SSL
-  html+='<div class="card"><h2>SSL / TLS</h2>';
+  h+='<div class="card"><h2><span class="icon">&#128274;</span> SSL / TLS</h2>';
   const days=parseInt(d.ssl.days_remaining)||0;
   const dStr=d.ssl.days_remaining;
-  html+='<div class="metric"><span class="label">Expiration</span><span class="value '+(days<14?'crit':days<30?'warn':'ok')+'">'+dStr+' jours</span></div>';
-  html+='</div>';
-  // Fail2ban
-  html+='<div class="card"><h2>Fail2ban</h2>';
-  html+='<div class="metric"><span class="label">SSH bannis</span><span class="value">'+d.fail2ban.sshd_banned+'</span></div>';
-  html+='<div class="metric"><span class="label">Récidive</span><span class="value">'+d.fail2ban.recidive_banned+'</span></div>';
-  html+='<div class="metric"><span class="label">File Postfix</span><span class="value">'+d.postfix_queue+'</span></div>';
-  html+='</div>';
-  document.getElementById('grid').innerHTML=html;
+  h+='<div class="metric"><span class="label">Expiration</span><span class="value '+(days<14?'crit':days<30?'warn':'ok')+'">'+dStr+' jours</span></div>';
+  h+='</div>';
+
+  // Fail2ban + Postfix
+  h+='<div class="card"><h2><span class="icon">&#128737;</span> Fail2ban</h2>';
+  h+='<div class="metric"><span class="label">SSH bannis</span><span class="value">'+d.fail2ban.sshd_banned+'</span></div>';
+  h+='<div class="metric"><span class="label">R\\u00e9cidive</span><span class="value">'+d.fail2ban.recidive_banned+'</span></div>';
+  h+='<div class="metric"><span class="label">File Postfix</span><span class="value">'+d.postfix_queue+'</span></div>';
+  h+='</div>';
+
+  // WebSec
+  if(d.websec){
+    h+='<div class="card"><h2><span class="icon">&#128737;</span> WebSec WAF</h2>';
+    h+='<div class="metric"><span class="label">Status</span>'+badge(d.websec.status)+'</div>';
+    if(d.websec.status!=='not_installed'){
+      h+='<div class="metric"><span class="label">Requ\\u00eates</span><span class="value">'+d.websec.requests_total.toLocaleString()+'</span></div>';
+      const blkPct=pct(d.websec.requests_blocked,d.websec.requests_total);
+      h+='<div class="metric"><span class="label">Bloqu\\u00e9es</span><span class="value" style="color:var(--accent)">'+d.websec.requests_blocked.toLocaleString()+' ('+blkPct+'%)</span></div>';
+      h+='<div class="bar"><div class="bar-fill" style="width:'+blkPct+'%;background:var(--accent)"></div></div>';
+      const th=d.websec.threats;
+      h+='<div class="threat-row">';
+      if(th.sqli) h+='<span class="threat-tag">SQLi: '+th.sqli+'</span>';
+      if(th.xss) h+='<span class="threat-tag">XSS: '+th.xss+'</span>';
+      if(th.bot) h+='<span class="threat-tag">Bot: '+th.bot+'</span>';
+      if(th.scan) h+='<span class="threat-tag">Scan: '+th.scan+'</span>';
+      if(th.bruteforce) h+='<span class="threat-tag">Brute: '+th.bruteforce+'</span>';
+      if(!th.sqli&&!th.xss&&!th.bot&&!th.scan&&!th.bruteforce) h+='<span class="empty">Aucune menace</span>';
+      h+='</div>';
+      h+='<div class="metric"><span class="label">Whitelist</span><span class="value">'+d.websec.whitelist_count+'</span></div>';
+      h+='<div class="metric"><span class="label">Blacklist</span><span class="value">'+d.websec.blacklist_count+'</span></div>';
+      if(d.websec.uptime&&d.websec.uptime!=='N/A') h+='<div class="metric"><span class="label">Uptime</span><span class="value">'+d.websec.uptime+'</span></div>';
+    } else {
+      h+='<div class="empty">Module WebSec non install\\u00e9</div>';
+    }
+    h+='</div>';
+  }
+
+  // Security
+  if(d.security){
+    h+='<div class="card"><h2><span class="icon">&#128272;</span> S\\u00e9curit\\u00e9</h2>';
+    h+='<div class="metric"><span class="label">AppArmor profils</span><span class="value">'+d.security.apparmor_enforced+' / '+d.security.apparmor_profiles+'</span></div>';
+    const au=d.security.auditd_alerts_24h;
+    h+='<div class="metric"><span class="label">Auditd alertes (24h)</span><span class="value '+(au>10?'warn':'ok')+'">'+au+'</span></div>';
+    h+='<div class="metric"><span class="label">ClamAV scan</span><span class="value">'+d.security.clamav_last_scan+'</span></div>';
+    const ct=d.security.clamav_threats;
+    h+='<div class="metric"><span class="label">ClamAV menaces</span><span class="value '+(ct>0?'crit':'ok')+'">'+ct+'</span></div>';
+    const rk=d.security.rkhunter_warnings;
+    h+='<div class="metric"><span class="label">Rkhunter warnings</span><span class="value '+(rk>0?'warn':'ok')+'">'+rk+'</span></div>';
+    h+='</div>';
+  }
+
+  // Network
+  if(d.network){
+    h+='<div class="card"><h2><span class="icon">&#127760;</span> R\\u00e9seau</h2>';
+    h+='<div class="metric"><span class="label">Connexions \\u00e9tablies</span><span class="value">'+d.network.established+'</span></div>';
+    h+='<div class="metric"><span class="label">Ports en \\u00e9coute</span><span class="value">'+d.network.listening_ports+'</span></div>';
+    if(d.network.top_connections&&d.network.top_connections.length>0){
+      h+='<div style="margin-top:.5em;font-size:.8em;color:var(--muted);text-transform:uppercase;letter-spacing:1px">Top connexions</div>';
+      d.network.top_connections.forEach(function(c){
+        h+='<div class="top-ip"><span class="ip">'+c.ip+'</span><span class="cnt">'+c.count+'</span></div>';
+      });
+    }
+    h+='</div>';
+  }
+
+  // Recent alerts
+  if(d.recent_alerts){
+    h+='<div class="card"><h2><span class="icon">&#128680;</span> Alertes r\\u00e9centes</h2>';
+    if(d.recent_alerts.length>0){
+      h+='<div class="alert-list">';
+      d.recent_alerts.forEach(function(a){
+        h+='<div class="alert-item">';
+        h+='<span class="alert-time">'+a.time+'</span>';
+        h+='<span class="alert-type alert-type-'+a.type+'">'+a.type+'</span>';
+        h+='<span>'+a.msg+'</span>';
+        h+='</div>';
+      });
+      h+='</div>';
+    } else {
+      h+='<div class="empty">Aucune alerte r\\u00e9cente</div>';
+    }
+    h+='</div>';
+  }
+
+  document.getElementById('grid').innerHTML=h;
 }
-function refresh(){fetch(API).then(r=>r.json()).then(render).catch(()=>{document.getElementById('ts').textContent='Erreur de connexion';})}
+function refresh(){fetch(API).then(function(r){return r.json()}).then(render).catch(function(){document.getElementById('htime').textContent='Erreur de connexion'})}
 refresh();
 setInterval(refresh,10000);
 </script>
