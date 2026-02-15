@@ -367,15 +367,17 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     # 4. Clone ou update
     if [[ -d /opt/websec/.git ]]; then
       cd /opt/websec
-      sudo -u websec git pull --ff-only || true
+      git pull --ff-only || true
     else
       git clone https://github.com/yrbane/websec.git /opt/websec
-      chown -R websec:websec /opt/websec
     fi
+    chown -R websec:websec /opt/websec
 
     # 5. Compiler
     cd /opt/websec
     cargo build --release --features tls
+    # Stopper le service avant de remplacer le binaire (evite "Text file busy")
+    systemctl stop websec 2>/dev/null || true
     cp /opt/websec/target/release/websec /usr/local/bin/websec
     chmod 755 /usr/local/bin/websec
     setcap 'cap_net_bind_service=+ep' /usr/local/bin/websec
