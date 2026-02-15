@@ -365,11 +365,13 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
     chown websec:websec /opt/websec /var/log/websec /var/lib/websec
 
     # 4. Clone ou update
+    local WEBSEC_REPO="https://github.com/yrbane/websec.git"
     if [[ -d /opt/websec/.git ]]; then
       cd /opt/websec
+      git remote set-url origin "$WEBSEC_REPO"
       git pull --ff-only || true
     else
-      git clone https://github.com/yrbane/websec.git /opt/websec
+      git clone "$WEBSEC_REPO" /opt/websec
     fi
     chown -R websec:websec /opt/websec
 
