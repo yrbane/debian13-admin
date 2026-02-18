@@ -104,14 +104,17 @@ verify_services() {
     fi
   fi
 
-  # GeoIP Block
+  # GeoIP Block (nftables ou ipset)
   if $GEOIP_BLOCK; then
-    if ipset list geoip_blocked >/dev/null 2>&1; then
-      local geoip_count
+    local geoip_count=0
+    if nft list set inet geoip blocked >/dev/null 2>&1; then
+      geoip_count=$(nft list set inet geoip blocked 2>/dev/null | grep -c '/' || echo "0")
+      emit_check ok "GeoIP nftables : ${geoip_count} plages bloquées"
+    elif ipset list geoip_blocked >/dev/null 2>&1; then
       geoip_count=$(ipset list geoip_blocked 2>/dev/null | grep -c '^[0-9]') || geoip_count=0
-      emit_check ok "GeoIP : ${geoip_count} plages bloquées"
+      emit_check ok "GeoIP ipset : ${geoip_count} plages bloquées"
     else
-      emit_check fail "GeoIP : ipset geoip_blocked non trouvé"
+      emit_check fail "GeoIP : ni nftables ni ipset configuré"
     fi
   fi
 
@@ -161,6 +164,12 @@ verify_services() {
         emit_check ok "phpMyAdmin : URL sécurisée (/${pma_alias})"
       else
         emit_check warn "phpMyAdmin : URL par défaut /phpmyadmin (risque sécurité)"
+      fi
+      # IP whitelist
+      if grep -q "Require ip" /etc/phpmyadmin/apache.conf 2>/dev/null; then
+        emit_check ok "phpMyAdmin : accès restreint par IP (whitelist)"
+      else
+        emit_check warn "phpMyAdmin : pas de restriction IP (URL obscure uniquement)"
       fi
     else
       emit_check fail "phpMyAdmin : non installé"
@@ -333,6 +342,20 @@ verify_web() {
       emit_check ok "Apache : limites de requêtes configurées"
     else
       emit_check warn "Apache : limites de requêtes non configurées"
+    fi
+
+    # HTTP/2
+    if a2query -m http2 >/dev/null 2>&1; then
+      emit_check ok "Apache : HTTP/2 activé (mod_http2)"
+    else
+      emit_check warn "Apache : HTTP/2 non activé (score SSL Labs limité)"
+    fi
+
+    # CSP per-domain support
+    if [[ -d /etc/apache2/csp.d ]]; then
+      local csp_count
+      csp_count=$(find /etc/apache2/csp.d -name "*.conf" 2>/dev/null | wc -l || echo "0")
+      emit_check ok "Apache : CSP per-domain supporté (${csp_count} override(s))"
     fi
 
     # TraceEnable
@@ -697,6 +720,54 @@ verify_system() {
     emit_check warn "Umask : non durci dans login.defs (attendu: 027)"
   fi
 
+  # PAM hardening (CIS 5.3)
+  if [[ -f /etc/security/pwquality.conf ]]; then
+    if grep -q "minlen = 12" /etc/security/pwquality.conf 2>/dev/null; then
+      emit_check ok "PAM : politique mots de passe configurée (minlen=12)"
+    else
+      emit_check warn "PAM : pwquality.conf présent mais minlen non durci"
+    fi
+  else
+    emit_check warn "PAM : pwquality.conf absent (pas de politique de mots de passe)"
+  fi
+  if [[ -f /etc/security/faillock.conf ]]; then
+    if grep -q "deny = 5" /etc/security/faillock.conf 2>/dev/null; then
+      emit_check ok "PAM : verrouillage de compte configuré (5 échecs → 15 min)"
+    else
+      emit_check warn "PAM : faillock.conf présent mais deny non configuré"
+    fi
+  else
+    emit_check warn "PAM : faillock.conf absent (pas de verrouillage de compte)"
+  fi
+
+  # Monitoring cron
+  local monitor_script="${MONITOR_SCRIPT:-/usr/local/bin/server-monitor.sh}"
+  if [[ -x "$monitor_script" ]]; then
+    emit_check ok "Monitoring : script proactif déployé"
+    if crontab -l 2>/dev/null | grep -q "server-monitor.sh"; then
+      emit_check ok "Monitoring : cron toutes les 5 min configuré"
+    else
+      emit_check warn "Monitoring : cron non configuré"
+    fi
+  else
+    emit_check warn "Monitoring : script proactif non déployé"
+  fi
+
+  # SSL expiry cron
+  if [[ -x "${SCRIPTS_DIR}/ssl-expiry-check.sh" ]]; then
+    emit_check ok "SSL : script de vérification quotidienne déployé"
+  fi
+
+  # Backup encryption
+  if command -v gpg >/dev/null 2>&1; then
+    local backup_key="${BACKUP_GPG_KEY_ID:-backup@$(hostname -f 2>/dev/null || echo localhost)}"
+    if gpg --list-keys "$backup_key" >/dev/null 2>&1; then
+      emit_check ok "Backup : clé GPG présente pour chiffrement local"
+    else
+      emit_check info "Backup : clé GPG sera générée au premier backup"
+    fi
+  fi
+
   # Sudo hardening
   if [[ -f /etc/sudoers.d/99-hardening ]]; then
     if visudo -c -f /etc/sudoers.d/99-hardening >/dev/null 2>&1; then
@@ -852,6 +923,13 @@ verify_dkim() {
       emit_check warn "Postfix : TLS sortant = may (opportuniste, recommandé: encrypt)"
     elif [[ -n "$smtp_tls" ]]; then
       emit_check warn "Postfix : TLS sortant = ${smtp_tls}"
+    fi
+
+    # DKIM rotation cron
+    if crontab -l 2>/dev/null | grep -q "dkim-rotate"; then
+      emit_check ok "DKIM : rotation automatique planifiée (trimestrielle)"
+    else
+      emit_check warn "DKIM : pas de rotation automatique planifiée"
     fi
 
     # Fail2ban banaction
@@ -1088,6 +1166,16 @@ verify_database() {
       if grep -q "slow_query_log.*=.*1" /etc/mysql/mariadb.conf.d/99-hardening.cnf 2>/dev/null; then
         emit_check ok "MariaDB : slow query log activé"
       fi
+      if grep -q "require_secure_transport" /etc/mysql/mariadb.conf.d/99-hardening.cnf 2>/dev/null; then
+        emit_check ok "MariaDB : TLS obligatoire (require_secure_transport)"
+      else
+        emit_check warn "MariaDB : TLS non obligatoire"
+      fi
+      if [[ -f /etc/mysql/ssl/server-cert.pem ]]; then
+        emit_check ok "MariaDB : certificat TLS présent"
+      else
+        emit_check warn "MariaDB : certificat TLS absent"
+      fi
     else
       emit_check warn "MariaDB : pas de configuration durcie (99-hardening.cnf absent)"
     fi
@@ -1128,9 +1216,17 @@ verify_resources() {
 
   # Swap
   if swapon --show | grep -q .; then
-    local swap_size
-    swap_size=$(free -h | awk '/^Swap:/ {print $2}')
-    emit_check ok "Swap : ${swap_size} configuré"
+    local swap_total swap_used swap_pct
+    swap_total=$(free -h | awk '/^Swap:/ {print $2}')
+    swap_used=$(free | awk '/^Swap:/ {print $3}')
+    swap_pct=$(free | awk '/^Swap:/ {if ($2>0) printf "%.0f", $3/$2*100; else print 0}')
+    if [[ "$swap_pct" -lt 50 ]]; then
+      emit_check ok "Swap : ${swap_total} configuré (${swap_pct}% utilisé)"
+    elif [[ "$swap_pct" -lt 80 ]]; then
+      emit_check warn "Swap : ${swap_total} configuré (${swap_pct}% utilisé — pression mémoire)"
+    else
+      emit_check fail "Swap : ${swap_total} configuré (${swap_pct}% utilisé — mémoire critique)"
+    fi
   else
     emit_check warn "Swap : non configuré"
   fi
@@ -1483,6 +1579,9 @@ verify_auditd() {
     grep -q "kernel_modules" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance chargement modules kernel"
     grep -q "time_change" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance changements d'horloge"
     grep -q "pam_config" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance configuration PAM"
+    grep -q "file_perm" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance changements permissions fichiers"
+    grep -q "network_socket" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance création sockets réseau"
+    grep -q "tmp_exec" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance exécution depuis /tmp"
   else
     emit_check warn "auditd : règles de hardening absentes"
   fi

@@ -19,6 +19,8 @@
 #   15a) journald      → limites taille logs systemd (éviter remplissage disque)
 #   15b) logrotate     → rotation des logs pour éviter le remplissage disque
 #   15c) needrestart   → redémarrage auto services après MAJ de librairies
+#   15c2) monitoring   → cron proactif (services, disque, SSL, Postfix) + alerte SSL
+#   15d) PAM           → politique mots de passe (pwquality) + verrouillage (faillock)
 #   16)  bashrc        → confort shell (couleurs, alias, fortune|cowsay|lolcat)
 #
 # Références sécurité :
@@ -868,6 +870,100 @@ if step_needed "sec_needrestart"; then
   mark_done "sec_needrestart"
 else
   log "sec_needrestart (deja fait)"
+fi
+
+# ---------------------------------- 15c2) Monitoring cron (déploiement automatique) ------
+# deploy_monitor_cron() est défini dans helpers.sh mais jamais appelé dans le flow
+# d'installation. On l'appelle ici pour activer la surveillance proactive.
+if step_needed "sec_monitor_cron"; then
+  section "Monitoring proactif (cron toutes les 5 min)"
+  deploy_monitor_cron
+  monitor_script="${MONITOR_SCRIPT:-/usr/local/bin/server-monitor.sh}"
+  add_cron_job "$monitor_script" "*/5 * * * * ${monitor_script}" "Monitoring proactif (5 min)"
+  log "Monitoring déployé : ${monitor_script} (cron toutes les 5 min)"
+
+  # Cron dédié SSL expiry (quotidien, en plus du monitoring général)
+  ssl_check_script="${SCRIPTS_DIR}/ssl-expiry-check.sh"
+  cat > "$ssl_check_script" <<'SSLCHECK'
+#!/bin/bash
+# Vérification quotidienne expiration SSL — généré par debian13-server.sh
+set -euo pipefail
+MIN_DAYS=14
+for cert_dir in /etc/letsencrypt/live/*/; do
+  [[ -d "$cert_dir" ]] || continue
+  cert="${cert_dir}fullchain.pem"
+  [[ -f "$cert" ]] || continue
+  domain=$(basename "$cert_dir")
+  exp=$(openssl x509 -in "$cert" -noout -enddate 2>/dev/null | cut -d= -f2)
+  [[ -z "$exp" ]] && continue
+  exp_epoch=$(date -d "$exp" +%s 2>/dev/null || echo 0)
+  now_epoch=$(date +%s)
+  days_left=$(( (exp_epoch - now_epoch) / 86400 ))
+  if [[ "$days_left" -lt "$MIN_DAYS" ]]; then
+    echo "[ALERTE] SSL ${domain} expire dans ${days_left} jours" | mail -s "[SSL] ${domain} expire dans ${days_left}j" root
+  fi
+done
+SSLCHECK
+  chmod +x "$ssl_check_script"
+  add_cron_job "$ssl_check_script" "0 6 * * * ${ssl_check_script}" "SSL expiry check quotidien"
+  log "Alerte SSL quotidienne déployée : ${ssl_check_script}"
+
+  mark_done "sec_monitor_cron"
+else
+  log "sec_monitor_cron (deja fait)"
+fi
+
+# ---------------------------------- 15d) PAM hardening (password + lockout) -------------
+# Politique de mot de passe (pam_pwquality) et verrouillage de compte (pam_faillock).
+# Ref : CIS Debian 13 Benchmark §5.3 — Configure PAM
+#
+# pam_pwquality force la complexité des mots de passe :
+#   minlen=12, dcredit=-1 (au moins 1 chiffre), ucredit=-1 (1 majuscule),
+#   lcredit=-1 (1 minuscule), ocredit=-1 (1 caractère spécial).
+#
+# pam_faillock verrouille un compte après N tentatives échouées :
+#   deny=5, unlock_time=900 (15 min). Empêche le brute-force local (su, login).
+#   even_deny_root=false pour ne pas bloquer root en urgence.
+if step_needed "sec_pam"; then
+  section "PAM hardening (politique mots de passe + verrouillage)"
+  apt_install libpam-pwquality
+
+  # Politique de complexité des mots de passe
+  if [[ -f /etc/security/pwquality.conf ]]; then
+    backup_file /etc/security/pwquality.conf
+    cat > /etc/security/pwquality.conf <<'PWQEOF'
+# CIS Debian 13 §5.3.1 — Password Quality
+minlen = 12
+dcredit = -1
+ucredit = -1
+lcredit = -1
+ocredit = -1
+minclass = 3
+maxrepeat = 3
+maxclassrepeat = 4
+gecoscheck = 1
+dictcheck = 1
+enforce_for_root
+PWQEOF
+    log "PAM: politique de complexité configurée (minlen=12, 3 classes minimum)"
+  fi
+
+  # Verrouillage de compte après échecs
+  if [[ -d /etc/security ]]; then
+    cat > /etc/security/faillock.conf <<'FLOCKEOF'
+# CIS Debian 13 §5.3.2 — Account Lockout
+deny = 5
+unlock_time = 900
+fail_interval = 900
+audit
+silent
+FLOCKEOF
+    log "PAM: verrouillage de compte configuré (5 échecs → 15 min)"
+  fi
+
+  mark_done "sec_pam"
+else
+  log "sec_pam (deja fait)"
 fi
 
 # ---------------------------------- 16) .bashrc global -------------------------------

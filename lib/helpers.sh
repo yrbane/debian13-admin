@@ -434,6 +434,18 @@ deploy_auditd_rules() {
 
 # === Mount operations (détection montage USB, NFS) ===
 -a always,exit -F arch=b64 -S mount,umount2 -F auid>=1000 -F auid!=4294967295 -k mount_ops
+
+# === File permission changes (CIS 4.1.9 — détection chmod/chown suspects) ===
+-a always,exit -F arch=b64 -S chmod,fchmod,fchmodat -F auid>=1000 -F auid!=4294967295 -k file_perm
+-a always,exit -F arch=b64 -S chown,fchown,fchownat,lchown -F auid>=1000 -F auid!=4294967295 -k file_owner
+
+# === Network socket creation (CIS 4.1.14 — détection reverse shell, exfiltration) ===
+-a always,exit -F arch=b64 -S socket -F a0=2 -k network_socket
+-a always,exit -F arch=b64 -S connect -F a0=2 -k network_connect
+
+# === Suspicious binary execution from /tmp, /dev/shm (exploit staging) ===
+-w /tmp -p x -k tmp_exec
+-w /dev/shm -p x -k shm_exec
 EOF
 
   log "auditd: règles de hardening déployées"

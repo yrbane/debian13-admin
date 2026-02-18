@@ -38,6 +38,9 @@ if $INSTALL_APACHE_PHP; then
   a2enmod proxy proxy_http proxy_wstunnel # Reverse proxy : HTTP backend + WebSocket passthrough
   a2enmod socache_shmcb                   # SSL session cache en mémoire partagée (performance TLS)
   a2enmod vhost_alias                     # VirtualDocumentRoot dynamique (wildcard subdomains)
+  a2enmod http2                            # HTTP/2 multiplexing (performance + score SSL Labs A+)
+  # Répertoire pour les overrides CSP par domaine
+  mkdir -p /etc/apache2/csp.d
   cat >/etc/apache2/conf-available/security-headers.conf <<'EOF'
 <IfModule mod_headers.c>
   Header always set X-Frame-Options "SAMEORIGIN"
@@ -46,7 +49,11 @@ if $INSTALL_APACHE_PHP; then
   Header always set X-XSS-Protection "1; mode=block"
   Header always set Permissions-Policy "geolocation=(), microphone=(), camera=()"
   Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+  # CSP par défaut (restrictive) — overridable par domaine via /etc/apache2/csp.d/<domain>.conf
+  Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; frame-ancestors 'self'"
 </IfModule>
+# Per-domain CSP overrides (creer /etc/apache2/csp.d/<domain>.conf pour surcharger)
+IncludeOptional /etc/apache2/csp.d/*.conf
 EOF
   a2enconf security-headers
 
@@ -74,6 +81,8 @@ EOF
     SSLSessionTickets       off
     SSLUseStapling          On
     SSLStaplingCache        shmcb:/var/run/ocsp(128000)
+    # HTTP/2 : multiplexage, header compression, server push
+    Protocols               h2 http/1.1
 </IfModule>
 EOF
   a2enconf ssl-hardening
@@ -315,8 +324,24 @@ DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';
 FLUSH PRIVILEGES;
 SQL
 
+    # Générer un certificat auto-signé pour MariaDB (chiffrement loopback)
+    db_ssl_dir="/etc/mysql/ssl"
+    if [[ ! -f "${db_ssl_dir}/server-cert.pem" ]]; then
+      mkdir -p "$db_ssl_dir"
+      openssl req -new -x509 -nodes -days 3650 \
+        -subj "/CN=MariaDB-Server/O=Bootstrap" \
+        -keyout "${db_ssl_dir}/server-key.pem" \
+        -out "${db_ssl_dir}/server-cert.pem" 2>/dev/null
+      # CA = self-signed (server-cert sert aussi de CA)
+      cp "${db_ssl_dir}/server-cert.pem" "${db_ssl_dir}/ca-cert.pem"
+      chown -R mysql:mysql "$db_ssl_dir"
+      chmod 600 "${db_ssl_dir}/server-key.pem"
+      chmod 644 "${db_ssl_dir}/server-cert.pem" "${db_ssl_dir}/ca-cert.pem"
+      log "MariaDB: certificat TLS auto-signé généré (${db_ssl_dir})"
+    fi
+
     # Durcissement configuration MariaDB
-    cat > /etc/mysql/mariadb.conf.d/99-hardening.cnf <<'DBCONF'
+    cat > /etc/mysql/mariadb.conf.d/99-hardening.cnf <<DBCONF
 [mysqld]
 bind-address            = 127.0.0.1
 local_infile            = 0
@@ -325,6 +350,11 @@ log_warnings            = 2
 slow_query_log          = 1
 slow_query_log_file     = /var/log/mysql/slow.log
 long_query_time         = 2
+# TLS pour les connexions client (même en loopback, protège contre le sniffing)
+ssl-ca                  = ${db_ssl_dir}/ca-cert.pem
+ssl-cert                = ${db_ssl_dir}/server-cert.pem
+ssl-key                 = ${db_ssl_dir}/server-key.pem
+require_secure_transport = ON
 DBCONF
     systemctl restart mariadb
     log "MariaDB: configuration durcie (bind localhost, local_infile=0, slow query log)"
@@ -388,6 +418,19 @@ PMASEC
     # Inclure le fichier de sécurité dans la config principale
     if ! grep -q "conf.d/security.php" /etc/phpmyadmin/config.inc.php 2>/dev/null; then
       echo "include('/etc/phpmyadmin/conf.d/security.php');" >> /etc/phpmyadmin/config.inc.php
+    fi
+
+    # Restriction IP : seules les IPs de confiance accèdent à phpMyAdmin
+    if [[ -n "${TRUSTED_IPS:-}" && -f /etc/phpmyadmin/apache.conf ]]; then
+      if ! grep -q "Require ip" /etc/phpmyadmin/apache.conf; then
+        pma_require="    Require ip 127.0.0.1 ::1"
+        for ip in $TRUSTED_IPS; do
+          pma_require+=" ${ip}"
+        done
+        # Remplacer le "Require all granted" par la whitelist IP
+        sed -i "s|Require all granted|${pma_require}|g" /etc/phpmyadmin/apache.conf
+        log "phpMyAdmin: accès restreint aux IPs de confiance"
+      fi
     fi
 
     systemctl reload apache2
@@ -519,6 +562,35 @@ EOF
   systemctl enable --now opendkim
   systemctl restart postfix
   note "Vérifier DKIM: opendkim-testkey -d ${DKIM_DOMAIN} -s ${DKIM_SELECTOR} -x /etc/opendkim.conf"
+
+  # Rotation DKIM automatique trimestrielle (les clés vieillissent = risque compromission)
+  dkim_rotate_script="${SCRIPTS_DIR}/dkim-rotate.sh"
+  cat > "$dkim_rotate_script" <<'DKIMROTATE'
+#!/bin/bash
+# Rotation DKIM trimestrielle — généré par debian13-server.sh
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/lib/core.sh" 2>/dev/null || source /root/scripts/lib/core.sh
+source "${SCRIPT_DIR}/lib/constants.sh" 2>/dev/null || source /root/scripts/lib/constants.sh
+source "${SCRIPT_DIR}/lib/helpers.sh" 2>/dev/null || source /root/scripts/lib/helpers.sh
+source "${SCRIPT_DIR}/lib/domain-manager.sh" 2>/dev/null || source /root/scripts/lib/domain-manager.sh
+
+DOMAINS_FILE="${DOMAINS_CONF:-/root/scripts/domains.conf}"
+[[ -f "$DOMAINS_FILE" ]] || exit 0
+
+while IFS=: read -r domain selector; do
+  [[ -z "$domain" || "$domain" == \#* ]] && continue
+  log "Rotation DKIM pour ${domain}..."
+  dm_rotate_dkim "$domain" || warn "Échec rotation DKIM pour ${domain}"
+done < "$DOMAINS_FILE"
+
+log "Rotation DKIM terminée."
+DKIMROTATE
+  chmod +x "$dkim_rotate_script"
+  # Cron trimestriel : 1er janvier, avril, juillet, octobre à 5h00
+  add_cron_job "$dkim_rotate_script" "${CRON_DKIM_ROTATE} ${dkim_rotate_script}" "Rotation DKIM trimestrielle"
+  log "Rotation DKIM automatique configurée (trimestrielle)"
+
     mark_done "web_postfix_dkim"
   else
     log "web_postfix_dkim (deja fait)"

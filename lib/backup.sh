@@ -28,6 +28,8 @@
 
 : "${BACKUP_DIR:=/root/backups}"
 : "${BACKUP_RETENTION_DAYS:=30}"
+: "${BACKUP_ENCRYPT:=true}"
+: "${BACKUP_GPG_KEY_ID:=backup@$(hostname -f 2>/dev/null || echo localhost)}"
 
 # Destination courante (initialisée par backup_init à chaque session)
 BACKUP_DEST=""
@@ -72,6 +74,15 @@ backup_configs() {
     mkdir -p "$dest/apache-sites"
     cp /etc/apache2/sites-available/*.conf "$dest/apache-sites/" 2>/dev/null || true
   fi
+
+  # Configs WebSec
+  if [[ -d /etc/websec ]]; then
+    mkdir -p "$dest/websec"
+    cp /etc/websec/*.toml "$dest/websec/" 2>/dev/null || true
+  fi
+
+  # Configs Fail2ban
+  [[ -f /etc/fail2ban/jail.local ]] && cp /etc/fail2ban/jail.local "$dest/" 2>/dev/null || true
 
   log "Backup: configurations sauvegardées"
 }
@@ -123,6 +134,72 @@ backup_crontab() {
 
   crontab -l > "${dest}/root.crontab" 2>/dev/null || true
   log "Backup: crontab sauvegardé"
+}
+
+# ---- Chiffrement local ----
+
+# backup_ensure_gpg_key — Générer une clé GPG dédiée au backup si absente.
+# La clé est sans passphrase (batch mode) pour permettre le chiffrement automatique
+# par cron. La clé privée est protégée par les permissions root-only du keyring.
+backup_ensure_gpg_key() {
+  if gpg --list-keys "$BACKUP_GPG_KEY_ID" >/dev/null 2>&1; then
+    return 0
+  fi
+  log "Backup: génération de la clé GPG (${BACKUP_GPG_KEY_ID})..."
+  gpg --batch --gen-key <<GPGKEY
+%no-protection
+Key-Type: RSA
+Key-Length: 4096
+Name-Real: Server Backup
+Name-Email: ${BACKUP_GPG_KEY_ID}
+Expire-Date: 0
+%commit
+GPGKEY
+  log "Backup: clé GPG générée (${BACKUP_GPG_KEY_ID})"
+}
+
+# backup_encrypt — Créer une archive chiffrée du répertoire de backup.
+# Produit un fichier .tar.gz.gpg à côté du répertoire original.
+# L'archive non chiffrée est supprimée après chiffrement réussi.
+backup_encrypt() {
+  local src="$1"
+  if ! command -v gpg >/dev/null 2>&1; then
+    warn "Backup: gpg non disponible, chiffrement ignoré"
+    return 0
+  fi
+  backup_ensure_gpg_key
+  local archive="${src}.tar.gz"
+  tar -czf "$archive" -C "$(dirname "$src")" "$(basename "$src")"
+  gpg --batch --yes --encrypt --recipient "$BACKUP_GPG_KEY_ID" --output "${archive}.gpg" "$archive"
+  rm -f "$archive"
+  log "Backup: chiffré → ${archive}.gpg"
+}
+
+# backup_verify — Test de restauration : déchiffre et vérifie l'intégrité de l'archive.
+# Retourne 0 si l'archive est valide, 1 sinon. N'extrait rien sur le filesystem.
+backup_verify() {
+  local gpg_file="$1"
+  if [[ ! -f "$gpg_file" ]]; then
+    warn "Backup verify: fichier ${gpg_file} non trouvé"
+    return 1
+  fi
+  local tmptar
+  tmptar=$(mktemp --suffix=.tar.gz)
+  if gpg --batch --yes --decrypt --output "$tmptar" "$gpg_file" 2>/dev/null; then
+    if tar -tzf "$tmptar" >/dev/null 2>&1; then
+      log "Backup verify: ${gpg_file} — intégrité OK"
+      rm -f "$tmptar"
+      return 0
+    else
+      warn "Backup verify: ${gpg_file} — archive corrompue"
+      rm -f "$tmptar"
+      return 1
+    fi
+  else
+    warn "Backup verify: ${gpg_file} — déchiffrement échoué"
+    rm -f "$tmptar"
+    return 1
+  fi
 }
 
 # ---- Gestion du cycle de vie ----
@@ -179,6 +256,12 @@ backup_full() {
   backup_dkim
   backup_mariadb
   backup_crontab
+
+  # Chiffrement GPG de l'archive (optionnel, activé par défaut)
+  if ${BACKUP_ENCRYPT:-true} && command -v gpg >/dev/null 2>&1; then
+    backup_encrypt "$BACKUP_DEST"
+  fi
+
   backup_cleanup
   log "Backup complet terminé: ${BACKUP_DEST}"
 }

@@ -50,6 +50,7 @@ readonly CRON_AIDE="0 4 * * *"                # quotidien 4h00
 readonly CRON_BLOCK_HACK="0 * * * *"            # toutes les heures
 readonly CRON_UPDATES="0 7 * * 1"             # hebdo lundi 7h00
 readonly CRON_AUDIT="0 7 * * 1"               # hebdo lundi 7h00
+readonly CRON_DKIM_ROTATE="0 5 1 1,4,7,10 *"  # trimestriel 1er jan/avr/jul/oct 5h00
 
 # DNS
 readonly DNS_RESOLVER="8.8.8.8"

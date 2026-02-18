@@ -177,9 +177,14 @@ if $INSTALL_UFW; then
     ufw status verbose
     log "UFW activé. Ports ouverts: ${SSH_PORT}/80/443."
 
-    # Filtrage egress (optionnel)
+    # Filtrage egress (recommandé en production — empêche un processus compromis
+    # de contacter un C2 sur un port exotique)
     if ${EGRESS_FILTER:-false}; then
       deploy_egress_rules
+      log "Egress filter activé (whitelist DNS/HTTP/SMTP/NTP uniquement)"
+    else
+      warn "Egress filter désactivé (EGRESS_FILTER=false) — recommandé en production"
+      note "Pour activer : EGRESS_FILTER=true dans le .conf et relancer"
     fi
     mark_done "base_ufw"
   else
@@ -203,43 +208,70 @@ fi
 if $GEOIP_BLOCK && $INSTALL_UFW; then
   if step_needed "base_geoip"; then
     section "Blocage GeoIP (${GEOIP_COUNTRY_COUNT} pays : Asie + Afrique)"
-  apt_install ipset
 
-  # Créer l'ipset s'il n'existe pas
-  ipset list geoip_blocked >/dev/null 2>&1 || ipset create geoip_blocked hash:net
+  # Préférer nftables (moderne) avec fallback ipset (legacy)
+  geoip_backend="ipset"
+  if command -v nft >/dev/null 2>&1; then
+    geoip_backend="nftables"
+    log "GeoIP: utilisation de nftables (natif)"
+  else
+    apt_install ipset
+    log "GeoIP: utilisation de ipset (legacy)"
+  fi
 
-  # Script de mise à jour des IPs bloquées
+  if [[ "$geoip_backend" == "nftables" ]]; then
+    # Créer la table et le set nftables
+    nft add table inet geoip 2>/dev/null || true
+    nft add set inet geoip blocked '{ type ipv4_addr; flags interval; }' 2>/dev/null || true
+    nft add chain inet geoip input '{ type filter hook input priority -10; policy accept; }' 2>/dev/null || true
+    nft add rule inet geoip input ip saddr @blocked drop 2>/dev/null || true
+  else
+    ipset list geoip_blocked >/dev/null 2>&1 || ipset create geoip_blocked hash:net
+  fi
+
+  # Script de mise à jour des IPs bloquées (supporte les deux backends)
   cat > /usr/local/bin/geoip-update.sh << 'GEOIPSCRIPT'
 #!/bin/bash
 CURL_TIMEOUT=10
 # Mise à jour des IPs bloquées par pays (Asie + Afrique)
-# Pour débloquer un pays: retirer son code de COUNTRIES et relancer le script
-# Codes pays: https://www.ipdeny.com/ipblocks/data/countries/
 
-# AFRIQUE (54 pays)
 AFRICA="dz ao bj bw bf bi cv cm cf td km cg cd ci dj eg gq er sz et ga gm gh gn gw ke ls lr ly mg mw ml mr mu ma mz na ne ng rw st sn sc sl so za ss sd tz tg tn ug zm zw"
-
-# ASIE (49 pays) - inclut Russie et Moyen-Orient
 ASIA="af am az bh bd bt bn kh cn ge in id ir iq il jo kz kw kg la lb my mv mn mm np kp om pk ps ph qa ru sa sg kr lk sy tw tj th tl tr tm ae uz vn ye"
-
 COUNTRIES="$AFRICA $ASIA"
 
-# Créer un ipset temporaire
-ipset create geoip_blocked_new hash:net -exist
-
+# Collecter toutes les plages
+TMPFILE=$(mktemp)
 for country in $COUNTRIES; do
   url="https://www.ipdeny.com/ipblocks/data/countries/${country}.zone"
+  curl -sfS --max-time "${CURL_TIMEOUT}" "$url" 2>/dev/null >> "$TMPFILE" || true
+done
+TOTAL=$(grep -c '^[0-9]' "$TMPFILE" 2>/dev/null || echo 0)
+
+if command -v nft >/dev/null 2>&1; then
+  # Backend nftables
+  nft flush set inet geoip blocked 2>/dev/null || true
+  # Charger par batch (performant)
+  {
+    echo "flush set inet geoip blocked"
+    echo "add element inet geoip blocked {"
+    while read -r ip; do
+      [[ -n "$ip" ]] && echo "  ${ip},"
+    done < "$TMPFILE"
+    echo "}"
+  } | nft -f - 2>/dev/null || true
+  echo "$(date): GeoIP nftables updated - ${TOTAL} ranges blocked"
+else
+  # Backend ipset (legacy fallback)
+  ipset create geoip_blocked_new hash:net -exist
   while read -r ip; do
     [[ -n "$ip" ]] && ipset add geoip_blocked_new "$ip" 2>/dev/null || true
-  done < <(curl -sfS --max-time "${CURL_TIMEOUT}" "$url" 2>/dev/null)
-done
-
-# Remplacer l'ancien set par le nouveau
-ipset swap geoip_blocked_new geoip_blocked 2>/dev/null || \
-  ipset rename geoip_blocked_new geoip_blocked 2>/dev/null
-ipset destroy geoip_blocked_new 2>/dev/null
-
-echo "$(date): GeoIP updated - $(ipset list geoip_blocked | grep -c '^[0-9]') ranges blocked"
+  done < "$TMPFILE"
+  ipset swap geoip_blocked_new geoip_blocked 2>/dev/null || \
+    ipset rename geoip_blocked_new geoip_blocked 2>/dev/null
+  ipset destroy geoip_blocked_new 2>/dev/null
+  echo "$(date): GeoIP ipset updated - ${TOTAL} ranges blocked"
+fi
+rm -f "$TMPFILE"
 GEOIPSCRIPT
   chmod +x /usr/local/bin/geoip-update.sh
 
@@ -247,11 +279,13 @@ GEOIPSCRIPT
   log "Téléchargement des plages IP à bloquer (peut prendre quelques minutes)..."
   /usr/local/bin/geoip-update.sh | tee -a "$LOG_FILE"
 
-  # Ajouter la règle UFW (dans before.rules)
-  if ! grep -q "geoip_blocked" /etc/ufw/before.rules; then
-    sed -i '/^# End required lines/a \
+  # Ajouter la règle UFW (seulement pour le backend ipset)
+  if [[ "$geoip_backend" == "ipset" ]]; then
+    if ! grep -q "geoip_blocked" /etc/ufw/before.rules; then
+      sed -i '/^# End required lines/a \
 # GeoIP blocking\
 -A ufw-before-input -m set --match-set geoip_blocked src -j DROP' /etc/ufw/before.rules
+    fi
   fi
 
   # Cron hebdomadaire pour mise à jour
