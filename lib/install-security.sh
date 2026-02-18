@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# lib/install-security.sh — ClamAV, rkhunter, Logwatch, SSH alerts, AIDE, ModSec, /tmp, sysctl, logrotate, bashrc
+# lib/install-security.sh — ClamAV, rkhunter, Logwatch, SSH alerts, AIDE, ModSec, /tmp, sysctl, logrotate, needrestart, bashrc
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh, lib/helpers.sh, lib/config.sh
 #
 # Sécurité applicative et monitoring post-intrusion. Contrairement à install-base.sh
@@ -15,9 +15,16 @@
 #   14g) AppArmor      → confinement des processus (MAC)
 #   14g2) auditd       → journalisation des accès sensibles (syscalls, fichiers)
 #   14h) /tmp sécurisé → noexec,nosuid,nodev (empêche l'exécution depuis /tmp)
-#   15)  sysctl        → durcissement kernel (ASLR, syncookies, redirects, etc.)
+#   15)  sysctl        → durcissement kernel (ASLR, syncookies, ptrace, redirects, etc.)
+#   15a) journald      → limites taille logs systemd (éviter remplissage disque)
 #   15b) logrotate     → rotation des logs pour éviter le remplissage disque
+#   15c) needrestart   → redémarrage auto services après MAJ de librairies
 #   16)  bashrc        → confort shell (couleurs, alias, fortune|cowsay|lolcat)
+#
+# Références sécurité :
+#   - CIS Debian 13 Benchmark — §1.x filesystem, §4.x audit, §5.x access
+#   - OWASP Server Security Configuration Guide
+#   - NIST SP 800-123 — Guide to General Server Security
 #
 # Chaque composant est optionnel (contrôlé par une variable $INSTALL_*).
 # Tous les scripts cron sont déployés via deploy_script() qui gère la création
@@ -35,9 +42,42 @@ if $INSTALL_CLAMAV; then
     apt_install clamav clamav-daemon mailutils cron
   systemctl enable --now cron || true
   systemctl stop clamav-freshclam || true
+
+  # Tuning freshclam : mises à jour 6x/jour, limites réseau
+  if [[ -f /etc/clamav/freshclam.conf ]]; then
+    backup_file /etc/clamav/freshclam.conf
+    sed -i 's/^#\?Checks .*/Checks 6/' /etc/clamav/freshclam.conf
+    sed -i 's/^#\?MaxAttempts .*/MaxAttempts 3/' /etc/clamav/freshclam.conf
+    sed -i 's/^#\?ConnectTimeout .*/ConnectTimeout 30/' /etc/clamav/freshclam.conf
+    sed -i 's/^#\?ReceiveTimeout .*/ReceiveTimeout 60/' /etc/clamav/freshclam.conf
+    log "freshclam: configuré (6 MAJ/jour, timeout 30s/60s)"
+  fi
+
   freshclam || true
   systemctl enable --now clamav-freshclam || true
   systemctl enable --now clamav-daemon || true
+
+  # Durcissement clamd.conf
+  if [[ -f /etc/clamav/clamd.conf ]]; then
+    backup_file /etc/clamav/clamd.conf
+    sed -i 's/^#\?MaxFileSize .*/MaxFileSize 400M/' /etc/clamav/clamd.conf
+    sed -i 's/^#\?MaxScanSize .*/MaxScanSize 400M/' /etc/clamav/clamd.conf
+    sed -i 's/^#\?MaxRecursion .*/MaxRecursion 30/' /etc/clamav/clamd.conf
+    sed -i 's/^#\?MaxFiles .*/MaxFiles 50000/' /etc/clamav/clamd.conf
+    sed -i 's/^#\?DetectPUA .*/DetectPUA yes/' /etc/clamav/clamd.conf
+    if ! grep -q "^ExcludePath \^/proc" /etc/clamav/clamd.conf; then
+      cat >> /etc/clamav/clamd.conf <<'CLAMEXCL'
+
+# Exclusions (filesystem virtuels)
+ExcludePath ^/proc
+ExcludePath ^/sys
+ExcludePath ^/dev
+ExcludePath ^/run
+CLAMEXCL
+    fi
+    systemctl restart clamav-daemon || true
+    log "ClamAV: clamd.conf durci (MaxFileSize 400M, DetectPUA, exclusions)"
+  fi
 
   mkdir -p "${SCRIPTS_DIR}"
   deploy_script "${SCRIPTS_DIR}/clamav_scan.sh" \
@@ -78,6 +118,13 @@ if $INSTALL_RKHUNTER; then
   sed -i 's/^MIRRORS_MODE=.*/MIRRORS_MODE=0/' /etc/rkhunter.conf
   sed -i 's/^WEB_CMD=.*/WEB_CMD=""/' /etc/rkhunter.conf
   sed -i 's/^ALLOWDEVFILE=.*/ALLOWDEVFILE=\/dev\/.udev\/rules.d\/root.rules/' /etc/rkhunter.conf
+  # Interdire SSH v1 (vulnérable) et activer les tests réseau
+  if grep -q "^#\?ALLOW_SSH_PROT_V1" /etc/rkhunter.conf; then
+    sed -i 's/^#\?ALLOW_SSH_PROT_V1=.*/ALLOW_SSH_PROT_V1=0/' /etc/rkhunter.conf
+  fi
+  if grep -q "^#\?ALLOW_SSH_ROOT_USER" /etc/rkhunter.conf; then
+    sed -i 's/^#\?ALLOW_SSH_ROOT_USER=.*/ALLOW_SSH_ROOT_USER=no/' /etc/rkhunter.conf
+  fi
   if ! grep -q "SCRIPTWHITELIST=/usr/bin/egrep" /etc/rkhunter.conf; then
     cat >> /etc/rkhunter.conf <<'RKHCONF'
 
@@ -469,6 +516,16 @@ if $INSTALL_APPARMOR; then
     apparmor_parser -r /etc/apparmor.d/ 2>/dev/null || true
   fi
 
+  # Vérifier que les processus critiques sont effectivement confinés
+  for profile in usr.sbin.apache2 usr.sbin.mariadbd; do
+    if [[ -f "/etc/apparmor.d/${profile}" ]]; then
+      aa-enforce "/etc/apparmor.d/${profile}" 2>/dev/null || true
+      log "AppArmor: ${profile} en mode enforce"
+    else
+      warn "AppArmor: profil ${profile} absent (processus non confiné)"
+    fi
+  done
+
   log "AppArmor activé avec profils locaux pour Apache, MariaDB et Postfix"
     mark_done "sec_apparmor"
   else
@@ -487,6 +544,16 @@ if $INSTALL_AUDITD; then
   apt_install auditd audispd-plugins
 
   systemctl enable --now auditd || true
+
+  # Limites auditd (éviter remplissage disque)
+  if [[ -f /etc/audit/auditd.conf ]]; then
+    backup_file /etc/audit/auditd.conf
+    sed -i 's/^max_log_file = .*/max_log_file = 50/' /etc/audit/auditd.conf
+    sed -i 's/^num_logs = .*/num_logs = 10/' /etc/audit/auditd.conf
+    sed -i 's/^max_log_file_action = .*/max_log_file_action = rotate/' /etc/audit/auditd.conf
+    sed -i 's/^space_left_action = .*/space_left_action = email/' /etc/audit/auditd.conf
+    log "auditd: limites configurées (50MB x 10 fichiers, rotation auto)"
+  fi
 
   deploy_auditd_rules
 
@@ -544,6 +611,17 @@ if $SECURE_TMP; then
       echo "tmpfs /var/tmp tmpfs defaults,noexec,nosuid,nodev,size=1G 0 0" >> /etc/fstab
       mount /var/tmp 2>/dev/null || true
     fi
+  fi
+
+  # /dev/shm : même traitement que /tmp (vecteur d'exploit en mémoire partagée)
+  if ! grep -q "/dev/shm.*noexec" /etc/fstab; then
+    if grep -q "[[:space:]]/dev/shm[[:space:]]" /etc/fstab; then
+      sed -i '/[[:space:]]\/dev\/shm[[:space:]]/ s/defaults/defaults,noexec,nosuid,nodev/' /etc/fstab
+    else
+      echo "tmpfs /dev/shm tmpfs defaults,noexec,nosuid,nodev 0 0" >> /etc/fstab
+    fi
+    mount -o remount /dev/shm 2>/dev/null || true
+    log "/dev/shm sécurisé avec noexec,nosuid,nodev"
   fi
 
   log "/tmp et /var/tmp sécurisés"
@@ -618,6 +696,9 @@ kernel.dmesg_restrict=1
 fs.protected_hardlinks=1
 fs.protected_symlinks=1
 fs.suid_dumpable=0
+kernel.yama.ptrace_scope=1
+kernel.randomize_va_space=2
+net.ipv4.conf.all.log_martians=1
 EOF
   sysctl --system | tee -a "$LOG_FILE"
 
@@ -646,10 +727,30 @@ EOF
   fi
 
   sed -ri 's|^#?Storage=.*|Storage=persistent|' /etc/systemd/journald.conf
+
+  # Limites journald (éviter remplissage disque)
+  mkdir -p /etc/systemd/journald.conf.d
+  cat > /etc/systemd/journald.conf.d/size-limit.conf <<'EOF'
+[Journal]
+SystemMaxUse=500M
+SystemKeepFree=1G
+SystemMaxFileSize=50M
+Compress=yes
+EOF
+
   systemctl restart systemd-journald
 
   apt_install unattended-upgrades
   dpkg-reconfigure -f noninteractive unattended-upgrades
+
+  # Notifications email pour mises à jour automatiques
+  if [[ -f /etc/apt/apt.conf.d/50unattended-upgrades ]]; then
+    backup_file /etc/apt/apt.conf.d/50unattended-upgrades
+    sed -i 's|^//Unattended-Upgrade::Mail .*|Unattended-Upgrade::Mail "root";|' /etc/apt/apt.conf.d/50unattended-upgrades
+    sed -i 's|^//Unattended-Upgrade::MailReport .*|Unattended-Upgrade::MailReport "on-change";|' /etc/apt/apt.conf.d/50unattended-upgrades
+    sed -i 's|^//Unattended-Upgrade::Remove-Unused-Dependencies .*|Unattended-Upgrade::Remove-Unused-Dependencies "true";|' /etc/apt/apt.conf.d/50unattended-upgrades
+    log "unattended-upgrades: notifications email activées"
+  fi
 
   mkdir -p "${SCRIPTS_DIR}"
   deploy_script "${SCRIPTS_DIR}/check-updates.sh" \
@@ -710,6 +811,38 @@ EOF
     log "Logrotate : rotation quotidienne configurée pour modsec_audit.log"
   fi
 
+  # WebSec logs
+  if [[ -d /var/log/websec ]]; then
+    cat > /etc/logrotate.d/websec <<'EOF'
+/var/log/websec/*.log {
+    daily
+    rotate 14
+    compress
+    delaycompress
+    missingok
+    notifempty
+    create 0640 websec websec
+    postrotate
+        systemctl reload websec > /dev/null 2>&1 || true
+    endscript
+}
+EOF
+    log "Logrotate: rotation quotidienne configurée pour websec"
+  fi
+
+  # Bootstrap structured log
+  cat >> /etc/logrotate.d/custom-bootstrap <<'EOF'
+
+/var/log/bootstrap_structured.jsonl {
+    monthly
+    rotate 3
+    compress
+    missingok
+    notifempty
+    create 0640 root root
+}
+EOF
+
   if logrotate --debug /etc/logrotate.d/custom-bootstrap > /dev/null 2>&1; then
     log "Logrotate : test de configuration OK"
   else
@@ -718,6 +851,23 @@ EOF
   mark_done "sec_logrotate"
 else
   log "sec_logrotate (deja fait)"
+fi
+
+# ---------------------------------- 15c) needrestart ------------------------------------
+# needrestart détecte les services qui doivent être redémarrés après une mise
+# à jour de librairies partagées. En mode automatique ($nrconf{restart} = 'a'),
+# il redémarre les services concernés sans intervention humaine.
+if step_needed "sec_needrestart"; then
+  section "needrestart (redémarrage auto services après MAJ)"
+  apt_install needrestart
+  if [[ -f /etc/needrestart/needrestart.conf ]]; then
+    backup_file /etc/needrestart/needrestart.conf
+    sed -i "s/^#\?\$nrconf{restart} = .*/\$nrconf{restart} = 'a';/" /etc/needrestart/needrestart.conf
+    log "needrestart: redémarrage automatique des services activé"
+  fi
+  mark_done "sec_needrestart"
+else
+  log "sec_needrestart (deja fait)"
 fi
 
 # ---------------------------------- 16) .bashrc global -------------------------------

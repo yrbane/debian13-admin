@@ -195,6 +195,19 @@ verify_ssh() {
     check_config_grep "$SSHD_CONFIG" "^Port\s+${SSH_PORT}" "SSH : port ${SSH_PORT} configuré" "SSH : port ${SSH_PORT} non trouvé"
     check_config_grep "$SSHD_CONFIG" "^AllowUsers\s+.*${ADMIN_USER}" "SSH : AllowUsers contient ${ADMIN_USER}" "SSH : AllowUsers sans ${ADMIN_USER}"
 
+    # LogLevel
+    check_config_grep "$SSHD_CONFIG" "^LogLevel\s+VERBOSE" "SSH : LogLevel VERBOSE (empreintes clés journalisées)" "SSH : LogLevel non VERBOSE (recommandé pour l'audit)"
+
+    # Banner
+    if [[ -f /etc/issue.net ]] && grep -q "autorise" /etc/issue.net 2>/dev/null; then
+      emit_check ok "SSH : bannière légale configurée (/etc/issue.net)"
+    else
+      emit_check warn "SSH : pas de bannière légale (/etc/issue.net)"
+    fi
+
+    # MaxStartups
+    check_config_grep "$SSHD_CONFIG" "^MaxStartups" "SSH : MaxStartups configuré (anti brute-force)" "SSH : MaxStartups non configuré"
+
     # Root authorized_keys (doit être vide si PermitRootLogin=no)
     if [[ -f /root/.ssh/authorized_keys ]]; then
       if [[ -s /root/.ssh/authorized_keys ]]; then
@@ -259,6 +272,30 @@ verify_web() {
       emit_check info "PHP : fonctions exec/shell autorisées (choix utilisateur)"
     fi
 
+    # PHP session hardening
+    if [[ -n "$php_ini" ]]; then
+      if grep -qE "^\s*session\.cookie_httponly\s*=\s*1" "$php_ini" 2>/dev/null; then
+        emit_check ok "PHP : session.cookie_httponly = 1"
+      else
+        emit_check warn "PHP : session.cookie_httponly non activé"
+      fi
+      if grep -qE "^\s*session\.cookie_secure\s*=\s*1" "$php_ini" 2>/dev/null; then
+        emit_check ok "PHP : session.cookie_secure = 1"
+      else
+        emit_check warn "PHP : session.cookie_secure non activé"
+      fi
+      if grep -qE "^\s*allow_url_include\s*=\s*Off" "$php_ini" 2>/dev/null; then
+        emit_check ok "PHP : allow_url_include = Off"
+      else
+        emit_check warn "PHP : allow_url_include non désactivé"
+      fi
+      if grep -qE "^\s*open_basedir\s*=" "$php_ini" 2>/dev/null; then
+        emit_check ok "PHP : open_basedir configuré"
+      else
+        emit_check warn "PHP : open_basedir non configuré (accès filesystem non restreint)"
+      fi
+    fi
+
     # HSTS
     if grep -q "Strict-Transport-Security" /etc/apache2/conf-available/security-headers.conf 2>/dev/null; then
       emit_check ok "Apache : header HSTS configuré"
@@ -271,6 +308,38 @@ verify_web() {
       emit_check ok "Apache : mod_security activé"
     else
       emit_check warn "Apache : mod_security non activé"
+    fi
+
+    # mod_evasive (anti-DDoS)
+    if a2query -m evasive >/dev/null 2>&1; then
+      emit_check ok "Apache : mod_evasive activé (anti-DDoS)"
+    else
+      emit_check warn "Apache : mod_evasive non activé"
+    fi
+
+    # SSL hardening config
+    if [[ -f /etc/apache2/conf-available/ssl-hardening.conf ]]; then
+      if a2query -c ssl-hardening >/dev/null 2>&1; then
+        emit_check ok "Apache : SSL/TLS durci (TLS 1.2+, OCSP stapling)"
+      else
+        emit_check warn "Apache : ssl-hardening.conf présent mais non activé"
+      fi
+    else
+      emit_check warn "Apache : configuration SSL/TLS durcie absente"
+    fi
+
+    # Request limits
+    if [[ -f /etc/apache2/conf-available/request-limits.conf ]]; then
+      emit_check ok "Apache : limites de requêtes configurées"
+    else
+      emit_check warn "Apache : limites de requêtes non configurées"
+    fi
+
+    # TraceEnable
+    if grep -q "TraceEnable Off" /etc/apache2/conf-available/security.conf 2>/dev/null; then
+      emit_check ok "Apache : méthode TRACE désactivée"
+    else
+      emit_check warn "Apache : méthode TRACE potentiellement active"
     fi
 
     # Version PHP
@@ -568,6 +637,59 @@ verify_system() {
     emit_check warn "Sysctl : fs.suid_dumpable = ${suid_dump} (attendu: 0)"
   fi
 
+  # Sysctl yama ptrace_scope (CIS 1.5.4)
+  local ptrace_scope
+  ptrace_scope=$(sysctl -n kernel.yama.ptrace_scope 2>/dev/null || echo "?")
+  if [[ "$ptrace_scope" == "1" ]]; then
+    emit_check ok "Kernel : ptrace_scope = 1 (restreint)"
+  elif [[ "$ptrace_scope" != "?" ]]; then
+    emit_check warn "Kernel : ptrace_scope = ${ptrace_scope} (attendu: 1)"
+  fi
+
+  # ASLR (CIS 1.5.3)
+  local aslr
+  aslr=$(sysctl -n kernel.randomize_va_space 2>/dev/null || echo "?")
+  if [[ "$aslr" == "2" ]]; then
+    emit_check ok "Kernel : ASLR complet (randomize_va_space = 2)"
+  elif [[ "$aslr" != "?" ]]; then
+    emit_check warn "Kernel : ASLR = ${aslr} (attendu: 2 = full)"
+  fi
+
+  # Journald limits
+  if [[ -f /etc/systemd/journald.conf.d/size-limit.conf ]]; then
+    emit_check ok "Journald : limites de taille configurées"
+  else
+    emit_check warn "Journald : pas de limites de taille (risque remplissage disque)"
+  fi
+
+  # needrestart
+  if command -v needrestart >/dev/null 2>&1; then
+    emit_check ok "needrestart : installé"
+    if grep -q "\\\$nrconf{restart} = 'a'" /etc/needrestart/needrestart.conf 2>/dev/null; then
+      emit_check ok "needrestart : mode automatique activé"
+    else
+      emit_check warn "needrestart : mode automatique non activé"
+    fi
+  else
+    emit_check warn "needrestart : non installé"
+  fi
+
+  # /dev/shm (CIS 1.1.7)
+  if mount | grep -E "/dev/shm.*noexec" >/dev/null 2>&1; then
+    emit_check ok "/dev/shm : monté avec noexec,nosuid,nodev"
+  elif grep -q "/dev/shm.*noexec" /etc/fstab 2>/dev/null; then
+    emit_check warn "/dev/shm : configuré dans fstab mais pas encore remonté"
+  else
+    emit_check warn "/dev/shm : pas sécurisé (noexec non actif)"
+  fi
+
+  # Unattended-upgrades email
+  if grep -q '^Unattended-Upgrade::Mail "root"' /etc/apt/apt.conf.d/50unattended-upgrades 2>/dev/null; then
+    emit_check ok "Unattended-upgrades : notifications email activées"
+  else
+    emit_check warn "Unattended-upgrades : notifications email non configurées"
+  fi
+
   # Umask
   if grep -qP '^UMASK\s+027' /etc/login.defs 2>/dev/null; then
     emit_check ok "Umask : 027 dans login.defs"
@@ -719,6 +841,24 @@ verify_dkim() {
         emit_check info "→ DNS: ${dns_key:0:40}..."
         emit_check info "→ Local: ${local_key:0:40}..."
       fi
+    fi
+
+    # Postfix TLS
+    local smtp_tls
+    smtp_tls=$(postconf -h smtp_tls_security_level 2>/dev/null || echo "")
+    if [[ "$smtp_tls" == "encrypt" ]]; then
+      emit_check ok "Postfix : TLS sortant = encrypt (obligatoire)"
+    elif [[ "$smtp_tls" == "may" ]]; then
+      emit_check warn "Postfix : TLS sortant = may (opportuniste, recommandé: encrypt)"
+    elif [[ -n "$smtp_tls" ]]; then
+      emit_check warn "Postfix : TLS sortant = ${smtp_tls}"
+    fi
+
+    # Fail2ban banaction
+    if grep -q "nftables-multiport" /etc/fail2ban/jail.local 2>/dev/null; then
+      emit_check ok "Fail2ban : banaction nftables (moderne)"
+    elif [[ -f /etc/fail2ban/jail.local ]]; then
+      emit_check warn "Fail2ban : banaction par défaut (recommandé: nftables-multiport)"
     fi
 
     # File d'attente emails
@@ -937,6 +1077,19 @@ verify_database() {
       emit_check ok "MariaDB : base 'test' supprimée"
     else
       emit_check warn "MariaDB : base 'test' existe encore"
+    fi
+
+    # Hardening config
+    if [[ -f /etc/mysql/mariadb.conf.d/99-hardening.cnf ]]; then
+      emit_check ok "MariaDB : configuration durcie (99-hardening.cnf)"
+      if grep -q "local_infile.*=.*0" /etc/mysql/mariadb.conf.d/99-hardening.cnf 2>/dev/null; then
+        emit_check ok "MariaDB : local_infile désactivé"
+      fi
+      if grep -q "slow_query_log.*=.*1" /etc/mysql/mariadb.conf.d/99-hardening.cnf 2>/dev/null; then
+        emit_check ok "MariaDB : slow query log activé"
+      fi
+    else
+      emit_check warn "MariaDB : pas de configuration durcie (99-hardening.cnf absent)"
     fi
 
     # Nombre de bases
@@ -1321,9 +1474,28 @@ verify_auditd() {
 
   local rules_file="${AUDIT_RULES_DIR:-/etc/audit/rules.d}/99-server-hardening.rules"
   if [[ -f "$rules_file" ]]; then
-    emit_check ok "auditd : règles de hardening présentes"
+    local rule_count
+    rule_count=$(grep -c "^-" "$rules_file" 2>/dev/null || echo "0")
+    emit_check ok "auditd : ${rule_count} règles de hardening déployées"
+    # Vérifier la présence de catégories clés
+    grep -q "identity" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance fichiers identité (passwd, shadow)"
+    grep -q "sshd_config" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance config SSH"
+    grep -q "kernel_modules" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance chargement modules kernel"
+    grep -q "time_change" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance changements d'horloge"
+    grep -q "pam_config" "$rules_file" 2>/dev/null && emit_check ok "auditd : surveillance configuration PAM"
   else
     emit_check warn "auditd : règles de hardening absentes"
+  fi
+
+  # Config auditd
+  if [[ -f /etc/audit/auditd.conf ]]; then
+    local max_log
+    max_log=$(grep "^max_log_file = " /etc/audit/auditd.conf 2>/dev/null | awk '{print $3}')
+    if [[ -n "$max_log" && "$max_log" -le 100 ]]; then
+      emit_check ok "auditd : max_log_file = ${max_log}MB (limité)"
+    elif [[ -n "$max_log" ]]; then
+      emit_check warn "auditd : max_log_file = ${max_log}MB (potentiellement trop grand)"
+    fi
   fi
 
   emit_section_close

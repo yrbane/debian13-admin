@@ -1,4 +1,5 @@
 #!/bin/bash
+set -euo pipefail
 
 # Destinataire du mail
 MAILTO="root@example.com"
@@ -8,6 +9,17 @@ LOG_DIR="/var/log/clamav"
 TODAY=$(date +'%Y-%m-%d')
 LOG_FILE="$LOG_DIR/scan-$TODAY.log"
 mkdir -p "$LOG_DIR"
+
+send_report() {
+    local subject="$1" body="$2"
+    { echo "To: $MAILTO"
+      echo "Subject: $subject"
+      echo "Content-Type: text/html; charset=UTF-8"
+      echo "MIME-Version: 1.0"
+      echo ""
+      echo "$body"
+    } | sendmail -t
+}
 
 # Ne lance pas freshclam si le démon tourne, utilise les signatures déjà à jour
 if ! systemctl is-active --quiet clamav-freshclam; then
@@ -23,13 +35,6 @@ clamscan -r -i --exclude-dir="^/sys" --exclude-dir="^/proc" --exclude-dir="^/dev
 # Filtrer uniquement les fichiers infectés
 INFECTED=$(grep "FOUND$" "$LOG_FILE")
 NUMINFECTED=$(echo "$INFECTED" | grep -c "FOUND$" || echo 0)
-
-# Fonction pour envoyer le mail HTML
-send_mail() {
-    local subject="$1"
-    local body="$2"
-    echo -e "$body" | mail -a "Content-Type: text/html; charset=UTF-8" -s "$subject" "$MAILTO"
-}
 
 # Préparer le tableau HTML
 prepare_table() {
@@ -78,27 +83,27 @@ if [[ $NUMINFECTED -gt 0 ]]; then
     TABLE=$(prepare_table "$INFECTED")
     GRAPH=$(generate_graph)
     MAILBODY="<html><body>"
-    MAILBODY+="<h2 style='color:#cc0000;'>⚠️ ClamAV - Virus détectés sur $(hostname)</h2>"
+    MAILBODY+="<h2 style='color:#cc0000;'>ClamAV - Virus détectés sur $(hostname)</h2>"
     MAILBODY+="<p><strong>Date :</strong> $(date '+%Y-%m-%d %H:%M:%S')</p>"
     MAILBODY+="<p><strong>Nombre de fichiers infectés :</strong> $NUMINFECTED</p>"
     MAILBODY+="$TABLE"
     MAILBODY+="<br>"
     MAILBODY+="$GRAPH"
     MAILBODY+="</body></html>"
-    send_mail "ClamAV - $NUMINFECTED virus détecté(s) sur $(hostname)" "$MAILBODY"
+    send_report "ClamAV - $NUMINFECTED virus détecté(s) sur $(hostname)" "$MAILBODY"
 else
     # Mail hebdomadaire si aucun virus (lundi = 1)
     DAYOFWEEK=$(date +%u)
     if [[ $DAYOFWEEK -eq 1 ]]; then
         GRAPH=$(generate_graph)
         MAILBODY="<html><body>"
-        MAILBODY+="<h2 style='color:#00aa00;'>✅ ClamAV - Rapport hebdomadaire sur $(hostname)</h2>"
+        MAILBODY+="<h2 style='color:#00aa00;'>ClamAV - Rapport hebdomadaire sur $(hostname)</h2>"
         MAILBODY+="<p><strong>Date :</strong> $(date '+%Y-%m-%d %H:%M:%S')</p>"
         MAILBODY+="<p>Aucun virus détecté cette semaine.</p>"
         MAILBODY+="<p>Les signatures et le scan se sont exécutés correctement.</p>"
         MAILBODY+="$GRAPH"
         MAILBODY+="</body></html>"
-        send_mail "ClamAV - Rapport hebdomadaire $(hostname)" "$MAILBODY"
+        send_report "ClamAV - Rapport hebdomadaire $(hostname)" "$MAILBODY"
     fi
 fi
 

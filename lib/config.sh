@@ -1,6 +1,17 @@
 #!/usr/bin/env bash
 # lib/config.sh — Gestion de la configuration (load, save, prompts, questions)
 # Sourcé par debian13-server.sh — Dépend de: lib/core.sh, lib/constants.sh
+#
+# Responsabilités :
+#   - Valeurs par défaut pour chaque variable de configuration
+#   - Prompts interactifs (prompt_default, prompt_yes_no) avec couleurs
+#   - Sérialisation / désérialisation du fichier .conf (load_config, save_config)
+#   - Collecte interactive de tous les paramètres d'installation (ask_config)
+#   - Migration de format entre versions (CONFIG_VERSION dans constants.sh)
+#
+# Le fichier .conf généré est au format shell (clé=valeur), sourceable.
+# Les variables booléennes sont stockées comme "true"/"false".
+# CONFIG_VARS[] est la source de vérité pour la liste complète des clés.
 
 # ---------------------------------- Valeurs par défaut -------------------------------
 HOSTNAME_FQDN_DEFAULT="example.com"

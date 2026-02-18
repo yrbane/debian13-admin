@@ -100,10 +100,25 @@ ClientAliveCountMax 2
 LoginGraceTime 20
 MaxAuthTries 3
 MaxSessions 3
+MaxStartups 3:50:10
 X11Forwarding no
+# LogLevel VERBOSE : journalise les empreintes de clés présentées (utile pour audit)
+LogLevel VERBOSE
+# Bannière légale (affichée avant l'authentification)
+Banner /etc/issue.net
 UsePAM yes
 Subsystem sftp  /usr/lib/openssh/sftp-server
 EOF
+
+  # Bannière légale SSH (dissuasion + conformité)
+  cat > /etc/issue.net <<'BANNER'
+*******************************************************************
+*  Acces reserve aux utilisateurs autorises.                      *
+*  Toute activite est journalisee et surveillee.                  *
+*  Les acces non autorises seront poursuivis.                     *
+*******************************************************************
+BANNER
+
   systemctl restart ssh || systemctl reload ssh
   warn "Garde une session SSH ouverte lors du changement de port ! Nouvelle connexion : ssh -p ${SSH_PORT} ${ADMIN_USER}@${HOSTNAME_FQDN}"
 
@@ -154,7 +169,8 @@ if $INSTALL_UFW; then
     apt_install ufw
     ufw default deny incoming
     ufw default allow outgoing
-    ufw allow "${SSH_PORT}/tcp" comment "SSH"
+    # Rate limiting SSH : max 6 connexions / 30s par IP (anti brute-force niveau kernel)
+    ufw limit "${SSH_PORT}/tcp" comment "SSH (rate-limited)"
     ufw allow 80/tcp comment "HTTP"
     ufw allow 443/tcp comment "HTTPS"
     yes | ufw enable || true
@@ -293,6 +309,8 @@ bantime  = 1h
 findtime = 10m
 maxretry = 5
 backend = systemd
+banaction = nftables-multiport
+banaction_allports = nftables-allports
 ignoreip = ${FAIL2BAN_IGNOREIP}
 destemail = ${EMAIL_FOR_CERTBOT}
 sender = fail2ban@${DKIM_DOMAIN:-\$(hostname -d)}
@@ -303,7 +321,9 @@ enabled = true
 port = ${SSH_PORT}
 filter = sshd
 logpath = %(sshd_log)s
-maxretry = 5
+maxretry = 3
+bantime = 2h
+findtime = 10m
 
 [apache-auth]
 enabled = true

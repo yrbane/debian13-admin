@@ -21,6 +21,10 @@ readonly NVM_VERSION="v0.40.1"
 readonly DKIM_KEY_BITS=2048
 readonly CONFIG_VERSION=2
 
+# needrestart : mode de redémarrage automatique
+# 'a' = automatique (pas de prompt), 'i' = interactif, 'l' = list only
+readonly NEEDRESTART_MODE="a"
+
 # Timeouts (secondes)
 readonly CURL_TIMEOUT=5
 readonly DNS_TIMEOUT=3
@@ -67,6 +71,7 @@ readonly GEOIP_COUNTRIES_ASIA="af am az bh bd bt bn kh cn ge in id ir iq il jo k
 readonly GEOIP_COUNTRY_COUNT=103
 
 # SSH hardening — sélection d'algorithmes post-quantiques et modernes.
+# Ref : CIS Debian 13 Benchmark §5.2 — Configure SSH Server
 # On préfère chacha20 (rapide sur CPU sans AES-NI) et sntrup761 (résistant
 # quantique). Ces listes sont injectées dans sshd_config.
 readonly SSH_CIPHERS="chacha20-poly1305@openssh.com,aes256-gcm@openssh.com,aes256-ctr"
@@ -114,6 +119,24 @@ readonly LOGROTATE_KEEP_DAYS=14
 readonly CAA_ISSUER="letsencrypt.org"
 readonly SPF_INCLUDE_OVH="mx.ovh.com"
 readonly DMARC_POLICY="quarantine"
+
+# PHP hardening — limites de ressources par défaut.
+# Ref : CIS PHP Benchmark §2.x — Resource Limits
+readonly PHP_MEMORY_LIMIT="256M"
+readonly PHP_UPLOAD_MAX_FILESIZE="50M"
+readonly PHP_POST_MAX_SIZE="50M"
+readonly PHP_MAX_EXECUTION_TIME=30
+readonly PHP_MAX_INPUT_VARS=3000
+
+# Apache hardening — limites de requêtes.
+# Ref : CIS Apache Benchmark §5.x — Request Limits
+readonly APACHE_TIMEOUT=60
+readonly APACHE_KEEPALIVE_TIMEOUT=5
+readonly APACHE_MAX_KEEPALIVE_REQUESTS=100
+readonly APACHE_LIMIT_REQUEST_BODY=52428800   # 50 Mo
+
+# Postfix — limites de messages.
+readonly POSTFIX_MESSAGE_SIZE_LIMIT=52428800   # 50 Mo
 
 # Couleurs HTML (charte Since & Co)
 readonly HTML_COLOR_DARK="#142136"

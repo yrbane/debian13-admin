@@ -89,8 +89,11 @@ preflight_checks() {
 # Fonctions réutilisables par toutes les bibliothèques d'installation.
 # Nommage : verbe_objet() pour les actions, check_*() pour les vérifications.
 
-# Sauvegarde horodatée d'un fichier avant modification (pattern .bak).
+# backup_file — Sauvegarde horodatée d'un fichier avant modification.
 # Appelée systématiquement avant tout sed/cp sur un fichier de config système.
+# Crée une copie avec suffixe .YYYYMMDDHHMMSS.bak (préserve permissions via cp -a).
+# Usage : backup_file /etc/ssh/sshd_config
+# Retourne 0 si OK, 1 si échec de copie (non bloquant : warn et continue).
 backup_file() {
   local f="$1"
   if [[ -f "$f" ]]; then
@@ -129,8 +132,11 @@ get_user_home() {
   fi
 }
 
-# Wrapper apt avec retry automatique : un premier échec relance apt-get update
-# puis réessaie. Couvre le cas classique d'un cache APT périmé sur une fresh install.
+# apt_install — Wrapper apt-get install avec retry automatique.
+# Un premier échec relance apt-get update puis réessaie (2 tentatives max).
+# Couvre le cas classique d'un cache APT périmé sur une fresh install OVH.
+# Usage : apt_install nginx certbot python3-certbot-apache
+# Retourne 0 si OK, 1 si échec après retries (err + return 1).
 apt_install() {
   local retries=2 attempt=1
   while (( attempt <= retries )); do
@@ -177,9 +183,11 @@ set_cron_mailto() {
   echo -e "MAILTO=${email}\n${clean}" | grep -v '^$' | crontab -
 }
 
-# Déployer un script cron à partir d'un template : écriture + substitution
-# de placeholders + chmod +x + enregistrement crontab en un seul appel.
+# deploy_script — Déployer un script cron depuis un template.
+# Écriture + substitution de placeholders + chmod +x + enregistrement crontab.
 # Les paires de substitution supplémentaires sont passées en arguments variadiques.
+# Usage : deploy_script "/root/scripts/scan.sh" "$TEMPLATE" "0 2 * * *" "Scan quotidien" "__VAR__" "value"
+# $1=chemin destination  $2=contenu  $3=schedule cron  $4=commentaire cron  $5,$6...=paires clé/valeur
 deploy_script() {
   local path="$1" content="$2" cron_schedule="${3:-}" cron_comment="${4:-}"
   shift 4 2>/dev/null || true
@@ -318,10 +326,13 @@ threshold_color() {
 # (via --domain-add ou lors de l'installation initiale).
 
 # ---------------------------------- AppArmor profiles --------------------------------
-# AppArmor confine chaque démon dans un profil restrictif. Les fichiers dans
-# /etc/apparmor.d/local/ étendent les profils stock sans les écraser, ce qui
-# survit aux mises à jour de paquets. On autorise uniquement les chemins
-# nécessaires (DocumentRoot, logs, TLS, sockets).
+# deploy_apparmor_profiles — Déployer les profils AppArmor locaux.
+# AppArmor confine chaque démon dans un profil restrictif (MAC : Mandatory Access Control).
+# Les fichiers dans /etc/apparmor.d/local/ étendent les profils stock sans les écraser,
+# ce qui survit aux mises à jour de paquets (apt ne touche pas local/).
+# On autorise uniquement les chemins nécessaires (DocumentRoot, logs, TLS, sockets).
+# Ref : CIS Debian 13 Benchmark §1.6 — Mandatory Access Controls
+# Usage : deploy_apparmor_profiles (pas d'arguments, utilise APPARMOR_LOCAL)
 deploy_apparmor_profiles() {
   local local_dir="${APPARMOR_LOCAL:-/etc/apparmor.d/local}"
   mkdir -p "$local_dir"
@@ -360,10 +371,13 @@ EOF
 }
 
 # ---------------------------------- auditd rules ------------------------------------
-# auditd trace les accès aux fichiers sensibles (passwd, shadow, sudoers, ssh)
-# et les exécutions privilégiées. Les règles sont dans un fichier numéroté 99-
-# pour être chargées en dernier (priorité maximale).
+# deploy_auditd_rules — Déployer les règles d'audit système.
+# auditd trace les accès aux fichiers sensibles (passwd, shadow, sudoers, ssh),
+# les exécutions privilégiées, les changements d'horloge et les modules kernel.
+# Les règles sont dans un fichier numéroté 99- pour être chargées en dernier (priorité max).
 # Le filtre auid>=1000 cible les humains (UID système < 1000 exclus).
+# Ref : CIS Debian 13 Benchmark §4.1 — Configure System Accounting (auditd)
+# Usage : deploy_auditd_rules (pas d'arguments, utilise AUDIT_RULES_DIR)
 deploy_auditd_rules() {
   local rules_dir="${AUDIT_RULES_DIR:-/etc/audit/rules.d}"
   mkdir -p "$rules_dir"
@@ -396,6 +410,30 @@ deploy_auditd_rules() {
 
 # === System startup ===
 -w /etc/systemd/ -p wa -k systemd
+
+# === Kernel module loading ===
+-a always,exit -F arch=b64 -S init_module,finit_module -k kernel_modules
+
+# === Time changes (détection manipulation horodatage pour masquer intrusion) ===
+-a always,exit -F arch=b64 -S adjtimex,settimeofday,clock_settime -k time_change
+-w /etc/localtime -p wa -k time_change
+
+# === PAM configuration (modification auth = potentielle backdoor) ===
+-w /etc/pam.d/ -p wa -k pam_config
+-w /etc/security/ -p wa -k pam_config
+
+# === Login/logout tracking ===
+-w /var/log/lastlog -p wa -k login_tracking
+-w /var/log/faillog -p wa -k login_tracking
+-w /var/log/wtmp -p wa -k login_tracking
+-w /var/log/btmp -p wa -k login_tracking
+
+# === Firewall rules (modification UFW/iptables) ===
+-w /etc/ufw/ -p wa -k firewall
+-w /etc/default/ufw -p wa -k firewall
+
+# === Mount operations (détection montage USB, NFS) ===
+-a always,exit -F arch=b64 -S mount,umount2 -F auid>=1000 -F auid!=4294967295 -k mount_ops
 EOF
 
   log "auditd: règles de hardening déployées"

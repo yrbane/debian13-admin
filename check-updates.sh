@@ -7,6 +7,17 @@ MAILTO="root@example.com"
 # Force une sortie non localisée (évite "En train de lister…", "Installé", etc.)
 export LC_ALL=C
 
+send_report() {
+    local subject="$1" body="$2"
+    { echo "To: $MAILTO"
+      echo "Subject: $subject"
+      echo "Content-Type: text/html; charset=UTF-8"
+      echo "MIME-Version: 1.0"
+      echo ""
+      echo "$body"
+    } | sendmail -t
+}
+
 # Fichier temporaire
 TMPFILE="$(mktemp)"
 trap 'rm -f "$TMPFILE"' EXIT
@@ -42,18 +53,13 @@ done < <(apt list --upgradable 2>/dev/null | sed '1d')
 echo "</table>" >> "$TMPFILE"
 
 if [[ $COUNT -eq 0 ]]; then
-  echo "<p style='color: green;'><strong>✅ Tous les paquets sont à jour.</strong></p>" >> "$TMPFILE"
+  echo "<p style='color: green;'><strong>Tous les paquets sont à jour.</strong></p>" >> "$TMPFILE"
 fi
 
 echo "</body></html>" >> "$TMPFILE"
 
 if [[ $COUNT -gt 0 ]]; then
-  mail -a "Content-Type: text/html; charset=UTF-8" \
-       -s "⚠️ $COUNT mise(s) à jour disponible(s) sur $(hostname)" \
-       "$MAILTO" < "$TMPFILE"
+  send_report "[MAJ] $COUNT mise(s) a jour disponible(s) sur $(hostname)" "$(cat "$TMPFILE")"
 else
-  mail -a "Content-Type: text/html; charset=UTF-8" \
-       -s "✅ Système à jour sur $(hostname)" \
-       "$MAILTO" < "$TMPFILE"
+  send_report "[MAJ] Systeme a jour sur $(hostname)" "$(cat "$TMPFILE")"
 fi
-

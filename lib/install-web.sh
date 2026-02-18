@@ -49,9 +49,65 @@ if $INSTALL_APACHE_PHP; then
 </IfModule>
 EOF
   a2enconf security-headers
+
+  # Configuration mod_evasive (protection DDoS basique)
+  cat > /etc/apache2/mods-available/evasive.conf <<'EOF'
+<IfModule mod_evasive20.c>
+    DOSHashTableSize    3097
+    DOSPageCount        5
+    DOSSiteCount        100
+    DOSPageInterval     1
+    DOSSiteInterval     1
+    DOSBlockingPeriod   60
+    DOSLogDir           /var/log/apache2/
+</IfModule>
+EOF
+  a2enmod evasive 2>/dev/null || true
+  log "mod_evasive configuré (DOSPageCount=5, DOSBlockingPeriod=60s)"
+
+  # Durcissement SSL/TLS global
+  cat > /etc/apache2/conf-available/ssl-hardening.conf <<'EOF'
+<IfModule mod_ssl.c>
+    SSLProtocol             all -SSLv3 -TLSv1 -TLSv1.1
+    SSLCipherSuite          ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305
+    SSLHonorCipherOrder     off
+    SSLSessionTickets       off
+    SSLUseStapling          On
+    SSLStaplingCache        shmcb:/var/run/ocsp(128000)
+</IfModule>
+EOF
+  a2enconf ssl-hardening
+  log "Apache SSL/TLS durci (TLS 1.2+, OCSP stapling, cipher suite moderne)"
+
   # Masquer la version d'Apache dans les réponses HTTP et les pages d'erreur.
   # Un attaquant qui connaît la version exacte peut cibler des CVE spécifiques.
   sed -ri 's/^ServerTokens .*/ServerTokens Prod/; s/^ServerSignature .*/ServerSignature Off/' /etc/apache2/conf-available/security.conf
+
+  # Désactiver TRACE (XST attack), masquer ETags (info leak inode/mtime)
+  if ! grep -q "TraceEnable Off" /etc/apache2/conf-available/security.conf; then
+    echo "TraceEnable Off" >> /etc/apache2/conf-available/security.conf
+  fi
+  if ! grep -q "FileETag None" /etc/apache2/conf-available/security.conf; then
+    echo "FileETag None" >> /etc/apache2/conf-available/security.conf
+  fi
+
+  # Limites de requêtes et timeouts (protection Slowloris, uploads abusifs)
+  cat > /etc/apache2/conf-available/request-limits.conf <<'EOF'
+# Timeout global (protège contre Slowloris et connexions pendantes)
+Timeout 60
+# KeepAlive : réutiliser les connexions TCP (performance)
+KeepAlive On
+MaxKeepAliveRequests 100
+KeepAliveTimeout 5
+# Limites de requêtes (protection contre les requêtes surdimensionnées)
+LimitRequestBody 52428800
+LimitRequestFields 50
+LimitRequestFieldSize 8190
+LimitRequestLine 8190
+EOF
+  a2enconf request-limits
+  log "Apache: limites de requêtes et timeouts configurés"
+
   # Durcissement PHP : on applique les mêmes règles à tous les SAPI (apache2, cli, fpm)
   # pour éviter les incohérences entre l'exécution web et les scripts cron.
   for INI in /etc/php/*/apache2/php.ini /etc/php/*/cli/php.ini /etc/php/*/fpm/php.ini; do
@@ -62,6 +118,23 @@ EOF
     php_ini_set "display_errors" "Off" "$INI"
     php_ini_set "display_startup_errors" "Off" "$INI"
     php_ini_set "log_errors" "On" "$INI"
+    # Limites ressources (protection contre les scripts abusifs)
+    php_ini_set "memory_limit" "256M" "$INI"
+    php_ini_set "max_execution_time" "30" "$INI"
+    php_ini_set "max_input_time" "30" "$INI"
+    php_ini_set "upload_max_filesize" "50M" "$INI"
+    php_ini_set "post_max_size" "50M" "$INI"
+    php_ini_set "max_input_vars" "3000" "$INI"
+    # Durcissement sessions (CIS PHP Benchmark)
+    php_ini_set "session\.cookie_httponly" "1" "$INI"
+    php_ini_set "session\.cookie_secure" "1" "$INI"
+    php_ini_set "session\.use_strict_mode" "1" "$INI"
+    php_ini_set "session\.cookie_samesite" "Lax" "$INI"
+    php_ini_set "session\.use_only_cookies" "1" "$INI"
+    php_ini_set "session\.use_trans_sid" "0" "$INI"
+    php_ini_set "allow_url_fopen" "Off" "$INI"
+    php_ini_set "allow_url_include" "Off" "$INI"
+    php_ini_set "open_basedir" "/var/www:/tmp:/usr/share" "$INI"
     if $PHP_DISABLE_FUNCTIONS; then
       if ! grep -q "^disable_functions.*exec" "$INI"; then
         php_ini_set "disable_functions" "${PHP_DISABLED_FUNCTIONS}" "$INI"
@@ -241,7 +314,20 @@ DROP DATABASE IF EXISTS test;
 DELETE FROM mysql.db WHERE Db='test' OR Db='test\_%';
 FLUSH PRIVILEGES;
 SQL
-    log "MariaDB installée (hardening de base)."
+
+    # Durcissement configuration MariaDB
+    cat > /etc/mysql/mariadb.conf.d/99-hardening.cnf <<'DBCONF'
+[mysqld]
+bind-address            = 127.0.0.1
+local_infile            = 0
+skip-symbolic-links      = 1
+log_warnings            = 2
+slow_query_log          = 1
+slow_query_log_file     = /var/log/mysql/slow.log
+long_query_time         = 2
+DBCONF
+    systemctl restart mariadb
+    log "MariaDB: configuration durcie (bind localhost, local_infile=0, slow query log)"
     mark_done "web_mariadb"
   else
     log "web_mariadb (deja fait)"
@@ -350,12 +436,21 @@ if $INSTALL_POSTFIX_DKIM; then
   postconf -e "mydestination=localhost"
   postconf -e "relayhost="
   postconf -e "mynetworks=127.0.0.0/8 [::1]/128"
-  postconf -e "smtp_tls_security_level=may"
+  postconf -e "smtp_tls_security_level=encrypt"
   postconf -e "smtp_tls_loglevel=1"
   postconf -e "smtpd_tls_security_level=may"
   postconf -e "smtp_tls_note_starttls_offer=yes"
   postconf -e "smtp_tls_CAfile=/etc/ssl/certs/ca-certificates.crt"
   postconf -e "smtputf8_enable=no"
+  # Protection contre les abus : limites de débit et de taille
+  postconf -e "message_size_limit=52428800"
+  postconf -e "smtpd_recipient_limit=50"
+  postconf -e "smtpd_error_sleep_time=5s"
+  postconf -e "smtpd_soft_error_limit=3"
+  postconf -e "smtpd_hard_error_limit=5"
+  # TLS minimal pour le serveur SMTP entrant (même en loopback-only)
+  postconf -e "smtpd_tls_protocols=!SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
+  postconf -e "smtp_tls_protocols=!SSLv2,!SSLv3,!TLSv1,!TLSv1.1"
 
   adduser opendkim postfix || true
   mkdir -p /etc/opendkim/{keys,conf.d,domains}
