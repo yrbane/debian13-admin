@@ -256,7 +256,7 @@ check_db_freshness() {
 
 php_ini_set() {
   local key="$1" value="$2" ini="$3"
-  sed -ri "s/^;?\s*${key}\s*=.*/${key} = ${value}/" "$ini"
+  sed -ri "s|^;?\s*${key}\s*=.*|${key} = ${value}|" "$ini"
 }
 
 check_file_perms() {

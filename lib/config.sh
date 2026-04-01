@@ -48,10 +48,10 @@ CONFIG_VARS=(
   "PHP_DISABLE_FUNCTIONS|bool"  "INSTALL_MARIADB|bool"  "INSTALL_PHPMYADMIN|bool"
   "INSTALL_POSTFIX_DKIM|bool"  "INSTALL_CERTBOT|bool"  "CERTBOT_WILDCARD|bool"  "INSTALL_DEVTOOLS|bool"
   "INSTALL_NODE|bool"  "INSTALL_RUST|bool"  "INSTALL_PYTHON3|bool"
-  "INSTALL_COMPOSER|bool"  "INSTALL_SYMFONY|bool"  "INSTALL_SHELL_FUN|bool"
+  "INSTALL_COMPOSER|bool"  "INSTALL_SYMFONY|bool"  "INSTALL_CLAUDE_CODE|bool"  "INSTALL_SHELL_FUN|bool"
   "INSTALL_YTDL|bool"  "INSTALL_CLAMAV|bool"  "INSTALL_RKHUNTER|bool"
   "INSTALL_LOGWATCH|bool"  "INSTALL_SSH_ALERT|bool"  "INSTALL_AIDE|bool"
-  "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "INSTALL_WEBSEC|bool"  "INSTALL_APPARMOR|bool"  "INSTALL_AUDITD|bool"  "EGRESS_FILTER|bool"
+  "INSTALL_MODSEC_CRS|bool"  "MODSEC_ENFORCE|bool"  "INSTALL_WEBSEC|bool"  "INSTALL_YGGDRASIL|bool"  "INSTALL_APPARMOR|bool"  "INSTALL_AUDITD|bool"  "EGRESS_FILTER|bool"
   "SECURE_TMP|bool"  "INSTALL_BASHRC_GLOBAL|bool"
   "TRUSTED_IPS|str"
   "SLACK_WEBHOOK|str"  "TELEGRAM_BOT_TOKEN|str"  "TELEGRAM_CHAT_ID|str"  "DISCORD_WEBHOOK|str"
@@ -64,10 +64,10 @@ declare -A MODULE_DEFAULTS=(
   [PHP_DISABLE_FUNCTIONS]=true  [INSTALL_MARIADB]=true  [INSTALL_PHPMYADMIN]=true
   [INSTALL_POSTFIX_DKIM]=true  [INSTALL_CERTBOT]=true  [CERTBOT_WILDCARD]=false  [INSTALL_DEVTOOLS]=true
   [INSTALL_NODE]=true  [INSTALL_RUST]=true  [INSTALL_PYTHON3]=true
-  [INSTALL_COMPOSER]=true  [INSTALL_SYMFONY]=false  [INSTALL_SHELL_FUN]=true
+  [INSTALL_COMPOSER]=true  [INSTALL_SYMFONY]=false  [INSTALL_CLAUDE_CODE]=false  [INSTALL_SHELL_FUN]=true
   [INSTALL_YTDL]=false  [INSTALL_CLAMAV]=true  [INSTALL_RKHUNTER]=true
   [INSTALL_LOGWATCH]=true  [INSTALL_SSH_ALERT]=true  [INSTALL_AIDE]=true
-  [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [INSTALL_WEBSEC]=false  [INSTALL_APPARMOR]=true  [INSTALL_AUDITD]=true  [EGRESS_FILTER]=false
+  [INSTALL_MODSEC_CRS]=true  [MODSEC_ENFORCE]=false  [INSTALL_WEBSEC]=false  [INSTALL_YGGDRASIL]=false  [INSTALL_APPARMOR]=true  [INSTALL_AUDITD]=true  [EGRESS_FILTER]=false
   [SECURE_TMP]=true  [INSTALL_BASHRC_GLOBAL]=true
   [TRUSTED_IPS]=""
   [SLACK_WEBHOOK]=""  [TELEGRAM_BOT_TOKEN]=""  [TELEGRAM_CHAT_ID]=""  [DISCORD_WEBHOOK]=""
@@ -272,6 +272,8 @@ ask_all_questions() {
   fi
   INSTALL_FAIL2BAN=true
   prompt_yes_no "Installer Fail2ban ?" "y" || INSTALL_FAIL2BAN=false
+  INSTALL_YGGDRASIL=false
+  prompt_yes_no "Installer Yggdrasil (réseau maillé IPv6 chiffré) ?" "n" && INSTALL_YGGDRASIL=true
   INSTALL_APACHE_PHP=true
   prompt_yes_no "Installer Apache + PHP + durcissements ?" "y" || INSTALL_APACHE_PHP=false
   PHP_DISABLE_FUNCTIONS=true
@@ -326,6 +328,8 @@ ask_all_questions() {
   if $INSTALL_COMPOSER; then
     prompt_yes_no "Installer Symfony CLI ?" "y" && INSTALL_SYMFONY=true
   fi
+  INSTALL_CLAUDE_CODE=false
+  prompt_yes_no "Installer Claude Code (assistant IA en CLI — nécessite clé API Anthropic) ?" "n" && INSTALL_CLAUDE_CODE=true
   INSTALL_SHELL_FUN=true
   prompt_yes_no "Installer fastfetch, fortune-mod, cowsay, lolcat, grc, p7zip/zip/unzip, beep ?" "y" || INSTALL_SHELL_FUN=false
   INSTALL_YTDL=false

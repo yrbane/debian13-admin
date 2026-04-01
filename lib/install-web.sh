@@ -39,6 +39,7 @@ if $INSTALL_APACHE_PHP; then
   a2enmod socache_shmcb                   # SSL session cache en mémoire partagée (performance TLS)
   a2enmod vhost_alias                     # VirtualDocumentRoot dynamique (wildcard subdomains)
   a2enmod http2                            # HTTP/2 multiplexing (performance + score SSL Labs A+)
+  a2enmod remoteip                         # IP réelle du client derrière reverse proxy (WebSec)
   # Répertoire pour les overrides CSP par domaine
   mkdir -p /etc/apache2/csp.d
   cat >/etc/apache2/conf-available/security-headers.conf <<'EOF'
@@ -117,6 +118,22 @@ EOF
   a2enconf request-limits
   log "Apache: limites de requêtes et timeouts configurés"
 
+  # mod_remoteip : afficher l'IP réelle du client dans les logs Apache
+  # quand un reverse proxy (WebSec) forward les requêtes depuis localhost.
+  cat > /etc/apache2/conf-available/remoteip.conf <<'EOF'
+# Trust WebSec reverse proxy for real client IP
+RemoteIPHeader X-Real-IP
+RemoteIPTrustedProxy 127.0.0.1
+RemoteIPTrustedProxy ::1
+EOF
+  a2enconf remoteip
+  # Patcher LogFormat : %h (IP proxy) → %a (IP réelle via mod_remoteip)
+  if grep -q '^LogFormat "%h ' /etc/apache2/apache2.conf; then
+    sed -i 's|^LogFormat "%h |LogFormat "%a |' /etc/apache2/apache2.conf
+    sed -i 's|^LogFormat "%v:%p %h |LogFormat "%v:%p %a |' /etc/apache2/apache2.conf
+  fi
+  log "Apache: mod_remoteip configuré (IP réelle du client dans les logs)"
+
   # Durcissement PHP : on applique les mêmes règles à tous les SAPI (apache2, cli, fpm)
   # pour éviter les incohérences entre l'exécution web et les scripts cron.
   for INI in /etc/php/*/apache2/php.ini /etc/php/*/cli/php.ini /etc/php/*/fpm/php.ini; do
@@ -141,9 +158,13 @@ EOF
     php_ini_set "session\.cookie_samesite" "Lax" "$INI"
     php_ini_set "session\.use_only_cookies" "1" "$INI"
     php_ini_set "session\.use_trans_sid" "0" "$INI"
-    php_ini_set "allow_url_fopen" "Off" "$INI"
     php_ini_set "allow_url_include" "Off" "$INI"
-    php_ini_set "open_basedir" "/var/www:/tmp:/usr/share" "$INI"
+    # Restrictions spécifiques aux SAPI web (apache2/fpm)
+    # CLI a besoin de allow_url_fopen (Composer) et d'un open_basedir large
+    if [[ "$INI" != */cli/* ]]; then
+      php_ini_set "allow_url_fopen" "Off" "$INI"
+      php_ini_set "open_basedir" "/var/www:/tmp:/usr/share" "$INI"
+    fi
     if $PHP_DISABLE_FUNCTIONS; then
       if ! grep -q "^disable_functions.*exec" "$INI"; then
         php_ini_set "disable_functions" "${PHP_DISABLED_FUNCTIONS}" "$INI"

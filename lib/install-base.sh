@@ -435,3 +435,83 @@ FILTEREOF
     log "base_fail2ban (deja fait)"
   fi
 fi
+
+# ---------------------------------- 5) Yggdrasil (réseau maillé chiffré) ---------------
+# Yggdrasil : réseau overlay IPv6 chiffré, routage mesh peer-to-peer.
+# Fournit une adresse IPv6 stable (200::/7) indépendante du FAI.
+# Utile pour : accès SSH entre machines sans IP publique, réseau privé chiffré,
+# contournement de NAT, résilience réseau.
+if ${INSTALL_YGGDRASIL:-false}; then
+  if step_needed "base_yggdrasil"; then
+    section "Yggdrasil (réseau maillé IPv6 chiffré)"
+
+    # Ajouter le dépôt officiel Yggdrasil
+    if [[ ! -f /etc/apt/sources.list.d/yggdrasil.list ]]; then
+      ygg_key="/usr/share/keyrings/yggdrasil-archive-keyring.gpg"
+      curl -fsSL "https://neilalexander.s3.dualstack.eu-west-2.amazonaws.com/deb/key.txt" \
+        | gpg --dearmor -o "$ygg_key"
+      chmod 644 "$ygg_key"
+      echo "deb [signed-by=${ygg_key}] https://neilalexander.s3.dualstack.eu-west-2.amazonaws.com/deb/ debian yggdrasil" \
+        > /etc/apt/sources.list.d/yggdrasil.list
+      apt-get update -qq
+      log "Dépôt Yggdrasil ajouté."
+    fi
+
+    apt_install yggdrasil
+
+    # Générer la config par défaut si absente
+    if [[ ! -f /etc/yggdrasil/yggdrasil.conf ]]; then
+      mkdir -p /etc/yggdrasil
+      yggdrasil -genconf > /etc/yggdrasil/yggdrasil.conf
+      # Le service tourne en tant que user yggdrasil — il doit pouvoir lire la config
+      chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf
+      chmod 640 /etc/yggdrasil/yggdrasil.conf
+      log "Configuration Yggdrasil générée."
+    fi
+
+    # Ajouter des peers publics pour la connectivité initiale
+    # (sans peers, le nœud est isolé)
+    ygg_conf="/etc/yggdrasil/yggdrasil.conf"
+    backup_file "$ygg_conf"
+
+    # Injecter des peers publics si la liste est vide (TLS + QUIC)
+    if grep -q 'Peers: \[\]' "$ygg_conf" 2>/dev/null; then
+      sed -i 's|Peers: \[\]|Peers: [\n    tls://fr2.servers.yggdrasil.eu:23108\n    tls://51.15.204.214:54321\n    tls://ygg-uplink.thingylabs.io:443\n    quic://37.186.113.100:1515\n    quic://scarlet.mboa.dev:3443\n  ]|' "$ygg_conf"
+      log "Peers publics ajoutés (TLS + QUIC, FR/EU)."
+    fi
+
+    # Activer le listener QUIC pour accepter les peerings entrants (UDP, performant)
+    if grep -q 'Listen: \[\]' "$ygg_conf" 2>/dev/null; then
+      sed -i 's|Listen: \[\]|Listen: [\n    quic://[::]:9002\n    tls://[::]:9001\n  ]|' "$ygg_conf"
+      log "Listeners activés (QUIC :9002, TLS :9001)."
+    fi
+
+    # Permissions : le service tourne en tant que user yggdrasil
+    chown root:yggdrasil /etc/yggdrasil/yggdrasil.conf
+    chmod 640 /etc/yggdrasil/yggdrasil.conf
+
+    # Activer et démarrer le service
+    systemctl enable --now yggdrasil
+    sleep 2
+
+    # Récupérer l'adresse IPv6 Yggdrasil
+    ygg_ip=""
+    ygg_ip=$(yggdrasilctl getSelf 2>/dev/null | grep -oP 'IPv6 address: \K[^ ]+' || true)
+    if [[ -z "$ygg_ip" ]]; then
+      ygg_ip=$(ip -6 addr show tun0 2>/dev/null | grep -oP '200:[0-9a-f:]+' | head -1 || true)
+    fi
+    log "Yggdrasil actif. IPv6 : ${ygg_ip:-'(en attente de peers)'}"
+
+    # Ouvrir les ports Yggdrasil dans UFW si actif
+    if $INSTALL_UFW && command -v ufw >/dev/null 2>&1; then
+      ufw allow in on tun0 comment "Yggdrasil mesh network" 2>/dev/null || true
+      ufw allow 9001/tcp comment "Yggdrasil TLS peering" 2>/dev/null || true
+      ufw allow 9002/udp comment "Yggdrasil QUIC peering" 2>/dev/null || true
+      log "UFW : ports Yggdrasil ouverts (tun0, TLS :9001/tcp, QUIC :9002/udp)."
+    fi
+
+    mark_done "base_yggdrasil"
+  else
+    log "base_yggdrasil (deja fait)"
+  fi
+fi

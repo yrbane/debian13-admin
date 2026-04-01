@@ -165,9 +165,11 @@ show_help() {
   printf "  - Node.js via nvm (LTS)\n"
   printf "  - Rust via rustup (stable)\n"
   printf "  - Composer (global)\n"
+  printf "  - Claude Code (assistant IA CLI par Anthropic)\n"
   printf "  - Confort shell (neofetch, fortune-mod, cowsay, lolcat, grc, p7zip, unrar)\n"
   printf "  - ClamAV (freshclam + daemon)\n"
   printf "  - WebSec (reverse proxy securite HTTP devant Apache)\n"
+  printf "  - Yggdrasil (réseau maillé IPv6 chiffré, overlay mesh)\n"
   printf "  - .bashrc commun pour tous les utilisateurs\n"
   printf "\n"
 
@@ -1429,6 +1431,36 @@ if $INSTALL_WEBSEC && $INSTALL_APACHE_PHP; then
   print_cmd "curl -sI https://${HOSTNAME_FQDN} | grep X-WebSec"
   print_note "Pour desactiver et restaurer Apache :"
   print_cmd "sudo websec restore -c /etc/websec/websec.toml"
+  echo ""
+fi
+
+if ${INSTALL_YGGDRASIL:-false}; then
+  print_title "Yggdrasil (réseau maillé IPv6)"
+  print_note "Réseau overlay chiffré peer-to-peer (adresse 200::/7)"
+  print_cmd "yggdrasilctl getSelf"
+  print_cmd "yggdrasilctl getPeers"
+  print_note "Configuration :"
+  print_cmd "nano /etc/yggdrasil/yggdrasil.conf"
+  print_note "Redémarrer après modification :"
+  print_cmd "sudo systemctl restart yggdrasil"
+  ygg_addr=$(yggdrasilctl getSelf 2>/dev/null | grep -oP 'IPv6 address:\s+\K[^ ]+' || echo "<en attente>")
+  print_note "Adresse Yggdrasil : ${ygg_addr}"
+  print_note "Accéder à ce serveur via Yggdrasil :"
+  print_cmd "ssh -p ${SSH_PORT} ${ADMIN_USER}@${ygg_addr}"
+  echo ""
+fi
+
+if ${INSTALL_CLAUDE_CODE:-false}; then
+  print_title "Claude Code (assistant IA CLI)"
+  print_note "Assistant IA en ligne de commande par Anthropic."
+  print_note "Configurer la clé API (première utilisation) :"
+  print_cmd "claude"
+  print_note "Ou définir la variable d'environnement :"
+  print_cmd "export ANTHROPIC_API_KEY='sk-ant-...'"
+  print_note "Utilisation :"
+  print_cmd "claude                    # mode interactif"
+  print_cmd "claude 'explique ce code' # question directe"
+  print_cmd "claude /help              # aide complète"
   echo ""
 fi
 

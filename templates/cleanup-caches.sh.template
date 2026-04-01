@@ -1,0 +1,62 @@
+#!/bin/sh
+# 00-cleanup-caches — Nettoyage des caches volumineux avant les crons quotidiens
+# Déployé par debian13-server.sh — ne pas modifier manuellement
+
+set -e
+
+LOG_TAG="cleanup-caches"
+
+log() { logger -t "$LOG_TAG" "$1"; }
+
+FREED=0
+
+# nvm : supprime les archives d'install (.tar.xz) déjà extraites
+for dir in /home/*/.nvm/.cache /root/.nvm/.cache; do
+    if [ -d "$dir" ]; then
+        size=$(du -sm "$dir" 2>/dev/null | awk '{print $1}')
+        rm -rf "${dir:?}"/*
+        FREED=$((FREED + size))
+        log "nvm cache: ${size}M libérés ($dir)"
+    fi
+done
+
+# npm : cache des tarballs téléchargés
+for dir in /home/*/.npm/_cacache /root/.npm/_cacache; do
+    if [ -d "$dir" ]; then
+        size=$(du -sm "$dir" 2>/dev/null | awk '{print $1}')
+        rm -rf "${dir:?}"/*
+        FREED=$((FREED + size))
+        log "npm cache: ${size}M libérés ($dir)"
+    fi
+done
+
+# apt : paquets .deb téléchargés (garde le dernier de chaque)
+if command -v apt-get >/dev/null 2>&1; then
+    size=$(du -sm /var/cache/apt/archives 2>/dev/null | awk '{print $1}')
+    apt-get clean -qq
+    new_size=$(du -sm /var/cache/apt/archives 2>/dev/null | awk '{print $1}')
+    delta=$((size - new_size))
+    [ "$delta" -gt 0 ] && FREED=$((FREED + delta))
+    log "apt cache: ${delta}M libérés"
+fi
+
+# cargo : registre cache (anciennes versions de crates)
+for dir in /home/*/.cargo/registry/cache /root/.cargo/registry/cache; do
+    if [ -d "$dir" ]; then
+        size=$(du -sm "$dir" 2>/dev/null | awk '{print $1}')
+        # Supprime les crates > 30 jours (les récentes sont encore utiles)
+        find "$dir" -type f -mtime +30 -delete 2>/dev/null
+        new_size=$(du -sm "$dir" 2>/dev/null | awk '{print $1}')
+        delta=$((size - new_size))
+        [ "$delta" -gt 0 ] && FREED=$((FREED + delta))
+        log "cargo cache: ${delta}M libérés ($dir)"
+    fi
+done
+
+# journald : tronque les logs > 200M
+if command -v journalctl >/dev/null 2>&1; then
+    journalctl --vacuum-size=200M --quiet 2>/dev/null || true
+    log "journald: vacuum à 200M"
+fi
+
+log "Total libéré: ~${FREED}M"

@@ -32,6 +32,24 @@
 # Tous les scripts cron sont déployés via deploy_script() qui gère la création
 # du fichier, le chmod +x, l'ajout au crontab et la substitution de placeholders.
 
+# ---------------------------------- 13z) Nettoyage caches quotidien -------------------
+# Script cron.daily qui tourne avant tous les autres (préfixe 00-) pour libérer
+# l'espace disque des caches volumineux (nvm, npm, apt, cargo, journald).
+# Cela évite que ClamAV tente de scanner des archives .tar.xz énormes dans
+# les caches nvm/npm et supprime le warning "decompress file size exceeds limits".
+if step_needed "sec_cleanup_caches"; then
+  section "Nettoyage caches quotidien (cron.daily)"
+
+  CLEANUP_SRC="${SCRIPT_DIR}/templates/cleanup-caches.sh.template"
+  [[ -f "$CLEANUP_SRC" ]] || CLEANUP_SRC="${SCRIPTS_DIR}/templates/cleanup-caches.sh.template"
+  install -m 755 "$CLEANUP_SRC" /etc/cron.daily/00-cleanup-caches
+
+  log "Nettoyage caches déployé → /etc/cron.daily/00-cleanup-caches"
+  mark_done "sec_cleanup_caches"
+else
+  log "sec_cleanup_caches (deja fait)"
+fi
+
 # ---------------------------------- 14) ClamAV ----------------------------------------
 # ClamAV : antivirus libre avec mises à jour de signatures via freshclam.
 # Le service freshclam tourne en daemon pour télécharger les signatures en continu.
@@ -88,9 +106,20 @@ CLAMEXCL
     "ClamAV scan quotidien" \
     "__CLAMAV_RETENTION__" "${CLAMAV_LOG_RETENTION_DAYS}"
 
+  # Scan léger quotidien (cron.daily) — /var/www et /home, exclut caches volumineux
+  cat > /etc/cron.daily/clamav-light <<'CLAMLIGHT'
+#!/bin/sh
+ionice -c3 nice -n 19 clamscan -ri /var/www /home \
+  --exclude-dir=/proc --exclude-dir=/sys --exclude-dir=/run \
+  --exclude-dir='\.nvm/\.cache' \
+  --log=/var/log/clamav/clamav.daily.log || true
+CLAMLIGHT
+  chmod 755 /etc/cron.daily/clamav-light
+  log "ClamAV: scan léger quotidien déployé → /etc/cron.daily/clamav-light"
+
   log "ClamAV opérationnel (signatures à jour si freshclam OK)."
-  log "Script de scan quotidien : ${SCRIPTS_DIR}/clamav_scan.sh"
-  log "Cron configuré : tous les jours à 2h00"
+  log "Script de scan complet : ${SCRIPTS_DIR}/clamav_scan.sh"
+  log "Cron configuré : scan complet quotidien à 2h00, scan léger via cron.daily"
     mark_done "sec_clamav"
   else
     log "sec_clamav (deja fait)"
@@ -103,7 +132,8 @@ fi
 # ports en écoute inhabituels, comptes sans mot de passe.
 #
 # Les whitelist SCRIPTWHITELIST/ALLOWHIDDEN évitent les faux positifs classiques
-# sur Debian (egrep/fgrep sont des wrappers shell, .java/.gitignore sont légitimes).
+# sur Debian (egrep/fgrep/lwp-request sont des wrappers shell, .java/.gitignore
+# et les fichiers cachés systemd dans /etc/ sont légitimes).
 # UPDATE_MIRRORS=0 + WEB_CMD="" = pas de mise à jour réseau automatique des signatures
 # (on utilise APT_AUTOGEN=true pour que les mises à jour apt régénèrent la base).
 if $INSTALL_RKHUNTER; then
@@ -135,9 +165,12 @@ SCRIPTWHITELIST=/usr/bin/egrep
 SCRIPTWHITELIST=/usr/bin/fgrep
 SCRIPTWHITELIST=/usr/bin/which
 SCRIPTWHITELIST=/usr/bin/ldd
+SCRIPTWHITELIST=/usr/bin/lwp-request
 ALLOWHIDDENDIR=/etc/.java
 ALLOWHIDDENFILE=/etc/.gitignore
 ALLOWHIDDENFILE=/etc/.mailname
+ALLOWHIDDENFILE=/etc/.resolv.conf.systemd-resolved.bak
+ALLOWHIDDENFILE=/etc/.updated
 RKHCONF
   fi
 

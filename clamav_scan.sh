@@ -30,7 +30,10 @@ else
 fi
 
 # Scan complet (exclut /sys, /proc, /dev)
-clamscan -r -i --exclude-dir="^/sys" --exclude-dir="^/proc" --exclude-dir="^/dev" / > "$LOG_FILE" 2>&1
+# Exclure caches volumineux (nvm .tar.xz → dépasse MaxFileSize) et logs compressés
+clamscan -r -i --exclude-dir="^/sys" --exclude-dir="^/proc" --exclude-dir="^/dev" \
+  --exclude-dir='\.nvm/\.cache' \
+  --exclude='/var/log/.*\.xz$' / > "$LOG_FILE" 2>&1
 
 # Filtrer uniquement les fichiers infectés
 INFECTED=$(grep "FOUND$" "$LOG_FILE")

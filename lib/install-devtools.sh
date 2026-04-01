@@ -211,3 +211,44 @@ if $INSTALL_SHELL_FUN; then
     log "dev_shell_fun (deja fait)"
   fi
 fi
+
+# ---------------------------------- 15) Claude Code (CLI IA) ---------------------------
+# Claude Code : assistant IA en ligne de commande par Anthropic.
+# Nécessite Node.js >= 18 (installé via nvm ou système).
+# L'utilisateur devra configurer sa clé API après installation.
+if ${INSTALL_CLAUDE_CODE:-false}; then
+  if step_needed "dev_claude_code"; then
+    section "Claude Code (assistant IA CLI)"
+
+    # Vérifier que Node.js est disponible (requis par Claude Code)
+    node_bin=""
+    if command -v node &>/dev/null; then
+      node_bin="node"
+    elif [[ -f "/home/${ADMIN_USER}/.nvm/nvm.sh" ]]; then
+      # Charger nvm pour trouver node
+      export NVM_DIR="/home/${ADMIN_USER}/.nvm"
+      # shellcheck disable=SC1091
+      . "$NVM_DIR/nvm.sh" 2>/dev/null || true
+      node_bin="node"
+    fi
+
+    if ! command -v "$node_bin" &>/dev/null; then
+      warn "Node.js requis pour Claude Code mais non trouvé. Installation de Node.js système..."
+      apt_install nodejs npm
+    fi
+
+    # Installer Claude Code globalement via npm
+    npm install -g @anthropic-ai/claude-code
+    log "Claude Code installé : $(claude --version 2>/dev/null || echo 'version inconnue')"
+
+    # Créer le fichier de config pour l'utilisateur admin
+    claude_dir="/home/${ADMIN_USER}/.claude"
+    mkdir -p "$claude_dir"
+    chown "${ADMIN_USER}:${ADMIN_USER}" "$claude_dir"
+
+    log "Claude Code prêt. Lancer 'claude' pour configurer la clé API."
+    mark_done "dev_claude_code"
+  else
+    log "dev_claude_code (deja fait)"
+  fi
+fi
