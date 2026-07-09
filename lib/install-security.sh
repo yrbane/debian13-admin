@@ -150,17 +150,22 @@ if $INSTALL_RKHUNTER; then
   sed -i 's/^MIRRORS_MODE=.*/MIRRORS_MODE=0/' /etc/rkhunter.conf
   sed -i 's/^WEB_CMD=.*/WEB_CMD=""/' /etc/rkhunter.conf
   sed -i 's/^ALLOWDEVFILE=.*/ALLOWDEVFILE=\/dev\/.udev\/rules.d\/root.rules/' /etc/rkhunter.conf
-  # Interdire SSH v1 (vulnérable) et activer les tests réseau
+  # OpenSSH >= 7.6 (Debian 13 = 9.x) a supprimé le protocole SSH-1 : il ne peut
+  # plus être activé, donc aucun risque. La valeur 2 supprime le faux positif
+  # "SSH configuration option 'Protocol' has not been set" de rkhunter — la
+  # valeur 0 le déclenche justement quand Protocol n'est pas explicite dans sshd_config.
   if grep -q "^#\?ALLOW_SSH_PROT_V1" /etc/rkhunter.conf; then
-    sed -i 's/^#\?ALLOW_SSH_PROT_V1=.*/ALLOW_SSH_PROT_V1=0/' /etc/rkhunter.conf
+    sed -i 's/^#\?ALLOW_SSH_PROT_V1=.*/ALLOW_SSH_PROT_V1=2/' /etc/rkhunter.conf
   fi
   if grep -q "^#\?ALLOW_SSH_ROOT_USER" /etc/rkhunter.conf; then
     sed -i 's/^#\?ALLOW_SSH_ROOT_USER=.*/ALLOW_SSH_ROOT_USER=no/' /etc/rkhunter.conf
   fi
-  if ! grep -q "SCRIPTWHITELIST=/usr/bin/egrep" /etc/rkhunter.conf; then
+  # Garde par sentinelle : la conf Debian standard whiteliste déjà egrep, donc
+  # tester sa présence sauterait toujours ce bloc (lwp-request jamais ajouté).
+  if ! grep -q "^# Whitelist debian13-server" /etc/rkhunter.conf; then
     cat >> /etc/rkhunter.conf <<'RKHCONF'
 
-# Whitelist pour Debian (éviter faux positifs)
+# Whitelist debian13-server (éviter faux positifs Debian)
 SCRIPTWHITELIST=/usr/bin/egrep
 SCRIPTWHITELIST=/usr/bin/fgrep
 SCRIPTWHITELIST=/usr/bin/which

@@ -781,7 +781,7 @@ monitor_run_all() {
   monitor_check_ssl     || { notify_all "ALERTE ${HOSTNAME_FQDN}: certificat SSL expire bientôt"; ((issues++)); }
   monitor_check_postfix || { notify_all "ALERTE ${HOSTNAME_FQDN}: file Postfix saturée"; ((issues++)); }
   if [[ "$issues" -eq 0 ]]; then
-    echo "Monitoring: ${issues} checks OK"
+    logger -t server-monitor "Monitoring OK (${issues} alerte)"
   else
     echo "Monitoring: ${issues} alertes détectées"
   fi
