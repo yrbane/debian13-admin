@@ -161,7 +161,7 @@ ovh_setup_spf() {
       rec=$(ovh_dns_get "$zone" "$rid") || continue
       if echo "$rec" | grep -q "v=spf1"; then
         log "SPF : enregistrement existant (ID ${rid}), mise à jour..."
-        ovh_dns_update "$zone" "$rid" "\"${spf_value}\"" || return 1
+        ovh_dns_update "$zone" "$rid" "${spf_value}" || return 1
         ovh_dns_refresh "$zone" || true
         return 0
       fi
@@ -169,7 +169,7 @@ ovh_setup_spf() {
   fi
 
   log "SPF : création de l'enregistrement..."
-  ovh_dns_create "$zone" "" "TXT" "\"${spf_value}\"" || return 1
+  ovh_dns_create "$zone" "" "TXT" "${spf_value}" || return 1
   ovh_dns_refresh "$zone" || true
 }
 
@@ -213,10 +213,10 @@ ovh_setup_dmarc() {
 
   if [[ -n "$existing_id" ]]; then
     log "DMARC : enregistrement existant (ID ${existing_id}), mise à jour..."
-    ovh_dns_update "$zone" "$existing_id" "\"${dmarc_value}\"" || return 1
+    ovh_dns_update "$zone" "$existing_id" "${dmarc_value}" || return 1
   else
     log "DMARC : création de l'enregistrement _dmarc.${zone}..."
-    ovh_dns_create "$zone" "_dmarc" "TXT" "\"${dmarc_value}\"" || return 1
+    ovh_dns_create "$zone" "_dmarc" "TXT" "${dmarc_value}" || return 1
   fi
   ovh_dns_refresh "$zone" || true
 }

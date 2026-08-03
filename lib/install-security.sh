@@ -524,6 +524,32 @@ open(p,"w").write(t.replace(r":{from_port}(?=[^\d]|$)",r":{from_port}\b"))
     websec lists whitelist add "127.0.0.1" 2>/dev/null || true
     websec lists whitelist add "::1" 2>/dev/null || true
 
+    # 10b. Hook de renouvellement : rendre les certs renouveles lisibles par
+    # WebSec (user non-root) puis le redemarrer. Sans ce hook, chaque
+    # renouvellement certbot recree privkey/fullchain en root:root 600 et
+    # WebSec crashe au chargement TLS (tous les domaines tombent).
+    mkdir -p /etc/letsencrypt/renewal-hooks/deploy
+    cat > /etc/letsencrypt/renewal-hooks/deploy/websec-cert-perms.sh <<'WEBSECPERM'
+#!/bin/bash
+# Accorde a WebSec l'acces aux certificats renouveles. Genere par debian13-server.sh.
+getent group websec >/dev/null 2>&1 || exit 0
+LE=/etc/letsencrypt
+chmod 755 "$LE" "$LE/live" "$LE/archive" 2>/dev/null || true
+for lineage in ${RENEWED_LINEAGE:-"$LE"/live/*}; do
+  [[ -d "$lineage" ]] || continue
+  domain=$(basename "$lineage")
+  ad="$LE/archive/$domain"; ld="$LE/live/$domain"
+  [[ -d "$ad" ]] || continue
+  chgrp websec "$ad" "$ld" 2>/dev/null || true
+  chmod 750 "$ad" "$ld" 2>/dev/null || true
+  chgrp websec "$ad"/privkey*.pem 2>/dev/null || true
+  chmod 640 "$ad"/privkey*.pem 2>/dev/null || true
+  chmod 644 "$ad"/cert*.pem "$ad"/chain*.pem "$ad"/fullchain*.pem 2>/dev/null || true
+done
+systemctl restart websec 2>/dev/null || true
+WEBSECPERM
+    chmod +x /etc/letsencrypt/renewal-hooks/deploy/websec-cert-perms.sh
+
     # 11. Demarrer
     systemctl enable --now websec
     systemctl reload apache2

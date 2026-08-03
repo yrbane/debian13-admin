@@ -194,7 +194,10 @@ EOF
     domain="${line%%:*}"
     selector="${line#*:}"
     keyfile=$(dm_dkim_key_path "$domain" "$selector")
-    [[ -f "$keyfile" ]] || continue
+    if [[ ! -f "$keyfile" ]]; then
+      warn "DKIM: cle absente pour ${domain} (selecteur ${selector}: ${keyfile}) — domaine EXCLU de la signature. Verifier ${DOMAINS_CONF}."
+      continue
+    fi
     echo "${selector}._domainkey.${domain} ${domain}:${selector}:${keyfile}" >> "$keytable"
     echo "*@${domain} ${selector}._domainkey.${domain}" >> "$signingtable"
   done < <(dm_list_domains)
@@ -377,6 +380,30 @@ dm_obtain_ssl() {
       -d "${domain}" -d "www.${domain}" \
       --email "$email" --agree-tos --non-interactive 2>&1
   fi
+}
+
+# Accorder a WebSec (user non-root) l'acces en lecture au certificat d'un domaine.
+# Sans cela, WebSec echoue a ouvrir fullchain/privkey ("Permission denied") et
+# crashe au demarrage du listener TLS — ce qui fait tomber TOUS les domaines.
+# Reference : /opt/websec/docs/sni-configuration.md § "Configuration des permissions".
+# Idempotent, sans effet si l'utilisateur websec n'existe pas.
+# $1 = domain
+dm_grant_cert_access_websec() {
+  local domain="$1"
+  getent group websec >/dev/null 2>&1 || return 0
+
+  local le="${LETSENCRYPT_DIR:-/etc/letsencrypt}"
+  # Repertoires traversables par le groupe websec
+  chmod 755 "$le" "$le/live" "$le/archive" 2>/dev/null || true
+  local ad="$le/archive/$domain" ld="$le/live/$domain"
+  [[ -d "$ad" ]] || return 0
+  chgrp websec "$ad" "$ld" 2>/dev/null || true
+  chmod 750 "$ad" "$ld" 2>/dev/null || true
+  # privkey lisible par le groupe websec ; cert/chain/fullchain lisibles
+  chgrp websec "$ad"/privkey*.pem 2>/dev/null || true
+  chmod 640 "$ad"/privkey*.pem 2>/dev/null || true
+  chmod 644 "$ad"/cert*.pem "$ad"/chain*.pem "$ad"/fullchain*.pem 2>/dev/null || true
+  log "WebSec: acces au certificat ${domain} accorde"
 }
 
 # ==============================================================================

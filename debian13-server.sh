@@ -917,6 +917,11 @@ if [[ -n "$DOMAIN_ADD" ]]; then
   # 5. DNS OVH (si credentials disponibles)
   if [[ -f "${OVH_DNS_CREDENTIALS}" ]]; then
     log "Configuration DNS via API OVH..."
+    # Detecter l'IP publique du serveur : dm_setup_dns saute A/AAAA si SERVER_IP
+    # est vide (ce chemin --domain-add n'appelle pas les libs qui la detectent).
+    SERVER_IP="${SERVER_IP:-$(curl -4 -sfS --max-time 10 https://api.ipify.org 2>/dev/null || curl -4 -sfS --max-time 10 https://ifconfig.me 2>/dev/null || echo "")}"
+    SERVER_IP6="${SERVER_IP6:-$(ip -6 addr show scope global 2>/dev/null | grep -oE 'inet6 [0-9a-f:]+' | grep -viE '^inet6 (fd|fc|200:)' | awk 'NR==1{print $2}')}"
+    [[ -n "$SERVER_IP" ]] && log "IP publique detectee : ${SERVER_IP}${SERVER_IP6:+ / ${SERVER_IP6}}"
     _OVH_AK="" _OVH_AS="" _OVH_CK=""
     if ovh_test_credentials 2>/dev/null; then
       dm_setup_dns "$DOMAIN_ADD" "$local_selector"
@@ -946,6 +951,11 @@ if [[ -n "$DOMAIN_ADD" ]]; then
     log "WebSec actif — migration des VHosts du nouveau domaine..."
     websec setup --noninteractive -c /etc/websec/websec.toml
     systemctl reload apache2
+    # WebSec (user non-root) doit pouvoir lire le nouveau certificat, sinon il
+    # crashe au chargement TLS et TOUS les domaines tombent. On accorde l'acces
+    # puis on redemarre le service pour qu'il prenne en compte le nouveau cert.
+    dm_grant_cert_access_websec "$DOMAIN_ADD"
+    systemctl restart websec 2>/dev/null || true
   fi
 
   # 8. Logrotate
