@@ -950,7 +950,17 @@ if [[ -n "$DOMAIN_ADD" ]]; then
   if systemctl is-active --quiet websec 2>/dev/null; then
     log "WebSec actif — migration des VHosts du nouveau domaine..."
     websec setup --noninteractive -c /etc/websec/websec.toml
-    systemctl reload apache2
+    # WebSec termine le TLS et parle en HTTP nu au backend Apache (8443). Il FAUT
+    # retirer SSLEngine/SSLCertificate des vhosts 8443 du nouveau domaine (comme
+    # a l'install, etape 9b) : sinon ce vhost SSL — souvent premier
+    # alphabetiquement — devient le vhost par defaut du port 8443 et
+    # intercepte/redirige le trafic HTTP des AUTRES domaines vers lui-meme.
+    for vhost in /etc/apache2/sites-available/*"${DOMAIN_ADD}"*.conf; do
+      [[ -f "$vhost" ]] || continue
+      grep -q ':8443' "$vhost" 2>/dev/null || continue
+      sed -i '/SSLEngine/d; /SSLCertificate/d' "$vhost"
+    done
+    apachectl configtest 2>/dev/null && systemctl reload apache2
     # WebSec (user non-root) doit pouvoir lire le nouveau certificat, sinon il
     # crashe au chargement TLS et TOUS les domaines tombent. On accorde l'acces
     # puis on redemarre le service pour qu'il prenne en compte le nouveau cert.
