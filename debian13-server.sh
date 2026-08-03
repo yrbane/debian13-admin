@@ -1262,6 +1262,7 @@ CHECK_MODE="cli"
 verify_services
 verify_ssh
 verify_web
+verify_websec
 verify_system
 verify_devtools
 verify_dkim

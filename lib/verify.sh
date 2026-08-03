@@ -474,6 +474,77 @@ verify_web() {
   emit_section_close
 }
 
+# Vérifier WebSec (WAF / reverse-proxy) : service, écoute dual-stack, config,
+# listes de contrôle d'accès et rapport de métriques live (endpoint Prometheus).
+verify_websec() {
+  if ! command -v websec >/dev/null 2>&1 && ! systemctl list-unit-files 2>/dev/null | grep -q '^websec\.service'; then
+    return 0   # WebSec non installé — section omise
+  fi
+  emit_section "WebSec (WAF / reverse-proxy)"
+  local cfg="/etc/websec/websec.toml"
+
+  # --- Service ---
+  if systemctl is-active --quiet websec; then
+    emit_check ok "Service : actif"
+  else
+    emit_check fail "Service : INACTIF — tous les sites derrière WebSec sont injoignables"
+  fi
+  local ver; ver=$(websec --version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+  [[ -n "$ver" ]] && emit_check info "Version : ${ver}"
+
+  # --- Écoute dual-stack (IPv4 + IPv6) ---
+  local l443; l443=$(ss -tlnH 2>/dev/null | awk '{print $4}' | grep -E ':443$' | head -1)
+  if [[ "$l443" == "*:443" || "$l443" == "[::]:443" ]]; then
+    emit_check ok "Écoute : dual-stack IPv4+IPv6 (${l443})"
+  elif [[ -n "$l443" ]]; then
+    emit_check warn "Écoute : ${l443} — non dual-stack ; les clients IPv6 seront refusés si des AAAA existent"
+  else
+    emit_check fail "Écoute : rien sur :443"
+  fi
+
+  # --- Config : certificats SNI + accès aux certs ---
+  if [[ -f "$cfg" ]]; then
+    local sni; sni=$(grep -c '\[\[server.listeners.tls.sni_certificates\]\]' "$cfg" 2>/dev/null)
+    emit_check info "Certificats SNI configurés : ${sni:-0}"
+  fi
+  if [[ -x /etc/letsencrypt/renewal-hooks/deploy/websec-cert-perms.sh ]]; then
+    emit_check ok "Hook cert-perms présent (accès WebSec aux certs préservé au renouvellement)"
+  else
+    emit_check warn "Hook cert-perms absent — WebSec peut perdre l'accès aux certs au renouvellement"
+  fi
+
+  # --- Listes de contrôle d'accès ---
+  local ldir="/etc/websec/lists" wl=0 bl=0
+  [[ -f "$ldir/whitelist.txt" ]] && wl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/whitelist.txt" 2>/dev/null)
+  [[ -f "$ldir/blacklist.txt" ]] && bl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/blacklist.txt" 2>/dev/null)
+  emit_check info "Listes : ${wl} whitelist / ${bl} blacklist (${ldir})"
+
+  # --- Rapport de métriques live (Prometheus, endpoint TLS) ---
+  local mport; mport=$(awk -F= '/^\[metrics\]/{f=1} f&&/port/{gsub(/[^0-9]/,"",$2);print $2;exit}' "$cfg" 2>/dev/null)
+  [[ -z "$mport" ]] && mport=9090
+  local m; m=$(curl -sS -k --max-time 5 "https://localhost:${mport}/metrics" 2>/dev/null)
+  [[ -z "$m" ]] && m=$(curl -sS --max-time 5 "http://localhost:${mport}/metrics" 2>/dev/null)
+  if [[ -n "$m" ]]; then
+    local allow block chall det
+    allow=$(awk -F' ' '/decisions_by_type\{decision="allow"\}/{print int($2)}' <<<"$m")
+    block=$(awk -F' ' '/decisions_by_type\{decision="block"\}/{print int($2)}' <<<"$m")
+    chall=$(awk -F' ' '/decisions_by_type\{decision="challenge"\}/{print int($2)}' <<<"$m")
+    det=$(awk '/^detections_total /{print int($2)}' <<<"$m")
+    local total=$(( ${allow:-0} + ${block:-0} + ${chall:-0} ))
+    emit_check ok "Rapport live : ${total} décisions — ${allow:-0} autorisées · ${block:-0} bloquées · ${chall:-0} défis"
+    emit_check info "Détections de menaces : ${det:-0}"
+    local badips; badips=$(awk '/reputation_by_ip\{/ && $2==0 {c++} END{print c+0}' <<<"$m")
+    [[ "${badips:-0}" -gt 0 ]] && emit_check info "IP à réputation nulle (bloquées) : ${badips}"
+    if [[ "${block:-0}" -gt 0 && "$total" -gt 0 ]]; then
+      emit_check info "Taux de blocage : $(( block * 100 / total ))% du trafic"
+    fi
+  else
+    emit_check warn "Métriques :${mport} injoignables — rapport live indisponible (endpoint TLS ? service down ?)"
+  fi
+
+  emit_section_close
+}
+
 verify_system() {
   emit_section "Sécurité Système"
 
