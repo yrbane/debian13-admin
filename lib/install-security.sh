@@ -515,14 +515,18 @@ open(p,"w").write(t.replace(r":{from_port}(?=[^\d]|$)",r":{from_port}\b"))
     sed -i 's/threshold_challenge = 20/threshold_challenge = 10/' /etc/websec/websec.toml
 
     # 10. Whitelist des IPs de confiance dans WebSec
+    # -c cible le dossier lists co-localise avec la config (/etc/websec/lists),
+    # celui que le runtime charge reellement. Sans -c, le CLI ecrirait dans un
+    # "lists/" relatif au CWD que le service (CWD=/) ne lit jamais.
+    WS_CFG="/etc/websec/websec.toml"
     if [[ -n "${TRUSTED_IPS:-}" ]]; then
       for ip in $TRUSTED_IPS; do
-        websec lists whitelist add "$ip" 2>/dev/null || true
+        websec lists whitelist add "$ip" -c "$WS_CFG" 2>/dev/null || true
       done
     fi
-    # Toujours whitelister localhost
-    websec lists whitelist add "127.0.0.1" 2>/dev/null || true
-    websec lists whitelist add "::1" 2>/dev/null || true
+    # Toujours whitelister localhost (IPv4 + IPv6)
+    websec lists whitelist add "127.0.0.1" -c "$WS_CFG" 2>/dev/null || true
+    websec lists whitelist add "::1" -c "$WS_CFG" 2>/dev/null || true
 
     # 10b. Hook de renouvellement : rendre les certs renouveles lisibles par
     # WebSec (user non-root) puis le redemarrer. Sans ce hook, chaque
