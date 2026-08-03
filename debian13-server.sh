@@ -118,7 +118,7 @@ show_help() {
   printf "  ${GREEN}--domain-add <dom> [sel]${RESET}  Ajouter un domaine sur le serveur.\n"
   printf "                            Crée automatiquement : clé DKIM, VHosts Apache,\n"
   printf "                            certificat SSL, enregistrements DNS (via OVH API),\n"
-  printf "                            page parking WebGL et rotation des logs.\n"
+  printf "                            page parking (geo3d) et rotation des logs.\n"
   printf "                            Le sélecteur DKIM est optionnel ${YELLOW}(défaut: mail)${RESET}.\n"
   printf "  ${GREEN}--domain-remove <dom>${RESET}     Retirer un domaine (VHosts + logrotate + OpenDKIM).\n"
   printf "                            Les clés DKIM, certificats SSL et fichiers web\n"

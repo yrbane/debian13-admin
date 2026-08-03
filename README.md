@@ -179,14 +179,18 @@ graph LR
 | **1** | `dm_register_domain` | `domains.conf` — domaine:selecteur |
 | **2** | `dm_generate_dkim_key` | `/etc/opendkim/keys/{domain}/{sel}.private` |
 | **3** | `dm_rebuild_opendkim` | keytable + signingtable + trustedhosts |
-| **4** | `dm_deploy_parking` | Page WebGL Three.js 3D + `robots.txt` |
+| **4** | `dm_deploy_parking` | Page parking autonome (CSS + geo3d canvas 2D) + `robots.txt` |
 | **5** | `dm_setup_dns` | API OVH : A, AAAA, www, SPF, DKIM, DMARC, CAA |
 | **6** | `dm_obtain_ssl` | Certbot DNS-01 wildcard ou HTTP-01 |
 | **7** | `dm_deploy_vhosts` | 000-redirect + 010-https + 020-wildcard |
+| **7b** | *(si WebSec actif)* | Migration ports + retrait `SSLEngine` du vhost + acces cert websec + restart |
 | **8** | `dm_deploy_logrotate` | `/etc/logrotate.d/apache-vhost-{domain}` |
 
 > [!NOTE]
 > Chaque etape est **tolerante aux erreurs**. Si le DNS echoue (pas de credentials OVH), le VHost est quand meme deploye. Corriger ensuite avec `--check-dns --fix`.
+
+> [!IMPORTANT]
+> **Devant WebSec** (proxy TLS optionnel) — quand WebSec est actif, `--domain-add` migre le nouveau vhost en HTTP nu sur `:8443` (WebSec termine le TLS), **retire `SSLEngine`** du vhost (sinon il deviendrait le vhost par defaut du port et redirigerait les autres domaines), accorde a l'utilisateur `websec` l'acces au certificat (+ hook certbot pour les renouvellements), puis **redemarre** WebSec. WebSec ecoute en **dual-stack `[::]`** (IPv4 + IPv6), en accord avec les enregistrements A **et** AAAA poses par `dm_setup_dns`.
 
 <details>
 <summary><strong>📦 Operations avancees sur les domaines</strong></summary>
@@ -504,7 +508,7 @@ debian13-server.sh              ← Point d'entree unique
 │   ├── tui.sh                  TUI whiptail/dialog + fallback
 │   └── hooks.sh                Plugins (hooks.d/)
 │
-├── templates/                  VHosts, parking WebGL, erreurs, cron
+├── templates/                  VHosts, parking (CSS + geo3d.js), erreurs, cron
 ├── tests/                      43 fichiers — 465 tests bats
 ├── hooks.d/                    Scripts hook
 ├── domains.conf                Registre domaines

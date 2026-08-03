@@ -102,6 +102,12 @@ MONITOR_SERVICES="apache2 postfix fail2ban ufw mariadb"
 Quand un check echoue, `monitor_run_all()` envoie une notification
 via tous les canaux configures (Slack, Telegram, Discord).
 
+> **Silence quand tout va bien** — `monitor_run_all()` n'ecrit sur `stdout`
+> (donc n'envoie un mail via cron) **que** s'il detecte au moins une alerte. Les
+> runs sains sont traces dans journald (`journalctl -t server-monitor`) au lieu
+> de generer un mail a chaque execution. Cela evite d'inonder la boite de
+> l'administrateur.
+
 ## Notifications
 
 Trois canaux independants. Chaque canal est optionnel : si la variable
@@ -382,3 +388,57 @@ Les fonctions TUI disponibles :
 | `tui_menu "Choix" "Titre" tag1 desc1 tag2 desc2` | Menu selection unique |
 | `tui_checklist "Choix" "Titre" tag1 desc1 on tag2 desc2 off` | Multi-selection |
 | `tui_msg "Message" "Titre"` | Boite de message |
+
+## Depannage courant
+
+### Mails bloques dans la file Postfix (`Host not found, try again`)
+
+Postfix tourne chroote (`/var/spool/postfix`) et s'appuie sur une copie de
+`/etc/resolv.conf` dans le chroot. Au boot, s'il demarre **avant** que
+`systemd-resolved` ait peuple le resolveur, la copie chroot se retrouve sans
+`nameserver` : plus aucune resolution MX externe → tout le courrier sortant part
+en `deferred` et la file grossit.
+
+Correctif durable applique par le script (drop-in systemd
+`postfix@-.service.d/chroot-resolv.conf`) : Postfix est ordonne **apres**
+`systemd-resolved`/`network-online`, et recopie `/etc/resolv.conf` dans le
+chroot a chaque demarrage. Depannage manuel :
+
+```bash
+# Verifier le resolveur du chroot
+grep nameserver /var/spool/postfix/etc/resolv.conf   # doit contenir un serveur
+
+# Reparer + relancer la file
+cp -fL /etc/resolv.conf /var/spool/postfix/etc/resolv.conf
+systemctl reload postfix
+postqueue -f          # relance la remise
+postqueue -p | tail   # verifier que la file se vide
+```
+
+À noter aussi : `root@<domaine>` doit etre local — `mydestination` doit inclure
+le FQDN, et un alias `root:` (dans `/etc/aliases`) evite les rebonds. Un
+`server-monitor` qui alerte sur une file pleine tout en ecrivant lui-meme dans
+la file cree une boucle d'amplification.
+
+### Un domaine redirige vers un autre (derriere WebSec)
+
+Symptome : `domaineA` redirige vers `domaineB`, page parking invisible. Cause
+habituelle : le vhost `:8443` du nouveau domaine a garde `SSLEngine On` alors
+que WebSec parle en HTTP nu au backend — ce vhost SSL devient le vhost par
+defaut du port et intercepte tout. Verifier :
+
+```bash
+# Aucun vhost :8443 actif ne doit contenir SSLEngine (WebSec gere le TLS)
+grep -l SSLEngine /etc/apache2/sites-enabled/*.conf
+# Le cas echeant, retirer SSLEngine/SSLCertificate du vhost, puis :
+apachectl configtest && systemctl reload apache2 && systemctl restart websec
+```
+
+Le 301 etant « Moved Permanently », **vider le cache du navigateur** apres
+correction. `--domain-add` gere ce retrait automatiquement (etape 8b).
+
+### Site injoignable en IPv6
+
+WebSec doit ecouter en **dual-stack** : `ss -tlnp | grep ':443'` doit montrer
+`*:443` (et non `0.0.0.0:443`). Les domaines publiant des `AAAA`, un WebSec
+lie a l'IPv4 seule ferait echouer les connexions IPv6.

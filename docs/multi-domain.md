@@ -123,21 +123,32 @@ incrementale — plus simple et sans risque de desynchronisation.
 
 | Fonction | Description |
 |----------|-------------|
-| `dm_deploy_parking $domain` | Page parking HTML + CSS + robots.txt |
+| `dm_deploy_parking $domain` | Page parking autonome : HTML + CSS + `js/geo3d.js` + robots.txt |
 | `dm_deploy_vhosts $domain` | VHosts HTTP redirect + HTTPS |
 | `dm_deploy_vhost_wildcard $domain` | VHost wildcard `*.domain` |
 | `dm_remove_vhosts $domain` | Supprime les VHosts (available + enabled) |
 | `dm_deploy_logrotate $domain` | Config logrotate pour le domaine |
 | `dm_remove_logrotate $domain` | Supprime la config logrotate |
+| `dm_grant_cert_access_websec $domain` | Donne a l'utilisateur `websec` l'acces en lecture au certificat (idempotent, no-op si websec absent) |
 
 Structure web par domaine :
 ```
 /var/www/example.com/
   www/public/
-    index.html          Page parking WebGL
+    index.html          Page parking (autonome, CSP-safe)
     robots.txt          Disallow all
-    css/style.css       Style parking
+    css/style.css       Style parking (fond CSS anime)
+    js/geo3d.js         Signature geo3d de yrbane (canvas 2D)
 ```
+
+La page parking est **100% autonome** — aucun script inline, aucun CDN — pour
+rester compatible avec une CSP stricte `default-src 'self'` (voir
+`security-headers.conf`). Le fond CSS anime (degrade + particules) est complete
+par la signature geometrique **geo3d de yrbane** : polyedres wireframe imbriques
+(sphere geodesique + solides de Platon) rendus en canvas 2D pur, servis en
+`/js/geo3d.js` (donc autorises par `script-src 'self'`). Chaque chargement varie
+**aleatoirement** : palette, solides (ico/oct/tetra/cube), niveau de subdivision,
+sens et vitesses de rotation. Template : `templates/parking-geo3d.js`.
 
 VHosts generes (numerotation = ordre de chargement Apache) :
 ```
@@ -174,11 +185,17 @@ Enregistrements crees/mis a jour :
 - `A` : domaine → `$SERVER_IP`
 - `A` : www.domaine → `$SERVER_IP`
 - `AAAA` : domaine → `$SERVER_IP6` (si disponible)
-- `TXT` : SPF (`v=spf1 ip4:... -all`)
+- `TXT` : SPF (`v=spf1 a mx ip4:<SERVER_IP> include:mx.ovh.com ~all`)
 - `TXT` : DKIM (`selecteur._domainkey.domaine`)
 - `TXT` : DMARC (`_dmarc.domaine`)
 - `CAA` : `0 issue "letsencrypt.org"` (si absent)
 - `TLSA` : `_25._tcp.domaine` (DANE pour SMTP)
+
+> `dm_setup_dns` a besoin de `$SERVER_IP` (et `$SERVER_IP6` si IPv6) pour poser
+> les `A`/`AAAA`. Dans le chemin `--domain-add`, ces variables sont detectees
+> automatiquement (via `curl`/`ip`) avant l'appel — sinon les enregistrements
+> d'adresse seraient silencieusement sautes. Les valeurs SPF/DMARC/DKIM sont
+> passees a l'API OVH deja entre guillemets (pas de double-quoting).
 
 #### Reverse proxy
 
@@ -259,16 +276,38 @@ Utilise le systeme `emit_check` (ok/warn/fail) de `lib/verify.sh`.
 ## Sequence `--domain-add`
 
 ```
-1. snapshot_create              Snapshot automatique (rollback possible)
-2. dm_register_domain           Ajouter au registre
-3. dm_generate_dkim_key         Generer la cle DKIM
-4. dm_rebuild_opendkim          Regenerer keytable/signingtable
-5. dm_deploy_parking            Page parking WebGL
-6. dm_setup_dns                 DNS OVH (si credentials)
-7. dm_obtain_ssl                Certificat Let's Encrypt
-8. dm_deploy_vhosts             VHosts Apache + a2ensite
-9. dm_deploy_logrotate          Rotation des logs
+1.  snapshot_create             Snapshot automatique (rollback possible)
+2.  dm_register_domain          Ajouter au registre
+3.  dm_generate_dkim_key        Generer la cle DKIM
+4.  dm_rebuild_opendkim         Regenerer keytable/signingtable
+5.  dm_deploy_parking           Page parking autonome (CSS + geo3d)
+6.  dm_setup_dns                DNS OVH (si credentials) — detecte SERVER_IP/IP6
+7.  dm_obtain_ssl               Certificat Let's Encrypt (wildcard DNS-01)
+8.  dm_deploy_vhosts            VHosts Apache + a2ensite
+8b. Integration WebSec          (si le service websec est actif) — voir ci-dessous
+9.  dm_deploy_logrotate         Rotation des logs
 ```
+
+### Integration WebSec (etape 8b)
+
+Quand le service `websec` est actif, `--domain-add` l'insere devant Apache :
+
+1. `websec setup --noninteractive` — migre les ports du nouveau vhost (80→8081,
+   443→8443) et ajoute le certificat au listener SNI de WebSec.
+2. **Retrait de `SSLEngine`/`SSLCertificate`** des vhosts `:8443` du domaine :
+   WebSec termine le TLS et parle en **HTTP nu** au backend Apache. Un vhost
+   restant en `SSLEngine On` — souvent premier alphabetiquement — deviendrait le
+   **vhost par defaut** du port 8443 et redirigerait le trafic HTTP des *autres*
+   domaines vers lui-meme (symptome : un domaine redirige vers un autre).
+3. `dm_grant_cert_access_websec $domain` — `chgrp websec` + permissions sur
+   `fullchain`/`privkey`. WebSec tourne en utilisateur non-root : sans acces en
+   lecture, il crashe au chargement TLS et **tous** les domaines tombent.
+4. **`systemctl restart websec`** (pas un simple `reload apache2`) pour charger
+   le nouveau certificat.
+
+Durabilite : le hook certbot `renewal-hooks/deploy/websec-cert-perms.sh`
+(genere par le setup WebSec) reapplique ces permissions et redemarre WebSec a
+chaque **renouvellement** de certificat.
 
 ## Sequence `--domain-remove`
 
