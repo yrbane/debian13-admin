@@ -580,6 +580,22 @@ EOF
   postconf -e "smtpd_milters=inet:localhost:${OPENDKIM_PORT}"
   postconf -e "non_smtpd_milters=inet:localhost:${OPENDKIM_PORT}"
 
+  # Chroot resolver : postfix tourne chrooté et copie /etc/resolv.conf dans
+  # /var/spool/postfix/etc/. Au boot, il démarrait AVANT systemd-resolved →
+  # resolv.conf chroot vide → aucune résolution MX externe → file d'attente qui
+  # monte sans fin. Drop-in : ordonner postfix après resolved + recopier le
+  # resolv.conf du host dans le chroot avant démarrage.
+  mkdir -p /etc/systemd/system/postfix@-.service.d
+  cat > /etc/systemd/system/postfix@-.service.d/chroot-resolv.conf <<'PFRESOLV'
+[Unit]
+After=systemd-resolved.service network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStartPre=+/bin/sh -c 'cp -fL /etc/resolv.conf /var/spool/postfix/etc/resolv.conf 2>/dev/null || true'
+PFRESOLV
+  systemctl daemon-reload
+
   systemctl enable --now opendkim
   systemctl restart postfix
   note "Vérifier DKIM: opendkim-testkey -d ${DKIM_DOMAIN} -s ${DKIM_SELECTOR} -x /etc/opendkim.conf"
