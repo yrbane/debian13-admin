@@ -44,11 +44,23 @@ html, body {
     100% { background-position: 0% 50%; }
 }
 
+/* geo3d — signature géométrique de yrbane, en fond subtil */
+#geo-canvas {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    width: 100%;
+    height: 100%;
+    display: block;
+    opacity: 0.55;
+    pointer-events: none;
+}
+
 /* Floating particles */
 .particles {
     position: fixed;
     inset: 0;
-    z-index: 1;
+    z-index: 2;
     overflow: hidden;
 }
 .particles span {
@@ -94,7 +106,7 @@ html, body {
 /* Content overlay */
 .overlay {
     position: relative;
-    z-index: 2;
+    z-index: 3;
     width: 100%;
     height: 100%;
     display: flex;

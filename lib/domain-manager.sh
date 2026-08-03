@@ -280,9 +280,12 @@ dm_deploy_parking() {
   local domain="$1"
   local docroot="${WEB_ROOT}/${domain}/www/public"
 
-  mkdir -p "${docroot}/css"
+  mkdir -p "${docroot}/css" "${docroot}/js"
   dm_render_template "parking-page.html" "$domain" "${docroot}/index.html" || return 1
   cp "${TEMPLATES_DIR}/parking-style.css" "${docroot}/css/style.css"
+  # geo3d de yrbane : signature 3D en fond (canvas 2D, servie en /js local pour
+  # respecter la CSP script-src 'self' — pas d'inline, pas de CDN).
+  cp "${TEMPLATES_DIR}/parking-geo3d.js" "${docroot}/js/geo3d.js"
 
   cat > "${docroot}/robots.txt" <<'EOF'
 User-agent: *

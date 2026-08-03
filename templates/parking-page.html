@@ -8,9 +8,12 @@
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-    <!-- Page parking autonome (CSS pur, aucune dépendance externe) —
-         compatible avec une CSP stricte default-src 'self'. -->
+    <!-- Page parking autonome (CSS + un seul JS local, aucune dépendance
+         externe) — compatible avec une CSP stricte default-src 'self'. -->
     <div class="bg-gradient"></div>
+
+    <!-- Signature géométrique 3D de yrbane (canvas 2D, variations aléatoires) -->
+    <canvas id="geo-canvas" aria-hidden="true"></canvas>
 
     <div class="particles" aria-hidden="true">
         <span></span><span></span><span></span><span></span><span></span>
@@ -26,5 +29,7 @@
             <span></span><span></span><span></span>
         </div>
     </main>
+
+    <script src="/js/geo3d.js" defer></script>
 </body>
 </html>
