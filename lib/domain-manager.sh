@@ -272,8 +272,10 @@ dm_rotate_dkim() {
 # config logrotate. Les VHosts sont numérotés pour contrôler l'ordre de
 # chargement Apache (000- redirect, 010- HTTPS, 015- proxy/mTLS, 020- wildcard).
 
-# Page parking WebGL : page d'attente esthétique déployée immédiatement.
-# Le template parking-page.html contient un canvas Three.js animé.
+# Page parking : page d'attente esthétique déployée immédiatement.
+# Le template parking-page.html est 100% autonome (CSS pur, aucune dépendance
+# externe) pour rester compatible avec la CSP stricte default-src 'self'
+# (voir security-headers.conf) — une page dépendant d'un CDN serait bloquée.
 dm_deploy_parking() {
   local domain="$1"
   local docroot="${WEB_ROOT}/${domain}/www/public"

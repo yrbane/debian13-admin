@@ -1,4 +1,4 @@
-/* Parking page — dark theme with WebGL background
+/* Parking page — dark theme, pure CSS (aucune dépendance externe)
  * Deployed by debian13-server.sh — Do not edit manually */
 
 :root {
@@ -18,43 +18,106 @@ html, body {
     height: 100%;
     overflow: hidden;
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-    background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-mid) 50%, var(--bg-deep) 100%);
+    background: var(--bg-dark);
     color: var(--text-primary);
 }
 
-/* Three.js canvas */
-#parking-canvas {
+/* Animated gradient background */
+.bg-gradient {
     position: fixed;
-    top: 0;
-    left: 0;
-    width: 100%;
-    height: 100%;
+    inset: 0;
     z-index: 0;
+    background: linear-gradient(135deg, var(--bg-dark) 0%, var(--bg-mid) 45%, var(--bg-deep) 100%);
+    background-size: 300% 300%;
+    animation: gradient-shift 18s ease infinite;
 }
+.bg-gradient::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 40%, rgba(107, 219, 219, 0.10), transparent 60%);
+}
+
+@keyframes gradient-shift {
+    0%   { background-position: 0% 50%; }
+    50%  { background-position: 100% 50%; }
+    100% { background-position: 0% 50%; }
+}
+
+/* Floating particles */
+.particles {
+    position: fixed;
+    inset: 0;
+    z-index: 1;
+    overflow: hidden;
+}
+.particles span {
+    position: absolute;
+    bottom: -10px;
+    width: 6px;
+    height: 6px;
+    background: var(--accent-cyan);
+    border-radius: 50%;
+    opacity: 0.4;
+    box-shadow: 0 0 8px rgba(107, 219, 219, 0.6);
+    animation: rise linear infinite;
+}
+@keyframes rise {
+    0%   { transform: translateY(0) scale(1);   opacity: 0; }
+    10%  { opacity: 0.5; }
+    90%  { opacity: 0.5; }
+    100% { transform: translateY(-102vh) scale(0.4); opacity: 0; }
+}
+
+/* Spread the 20 particles across the width with varied size/speed/delay */
+.particles span:nth-child(1)  { left:  4%; animation-duration: 15s; animation-delay: 0s;   }
+.particles span:nth-child(2)  { left:  9%; animation-duration: 20s; animation-delay: 3s;   width: 4px; height: 4px; }
+.particles span:nth-child(3)  { left: 14%; animation-duration: 12s; animation-delay: 6s;   }
+.particles span:nth-child(4)  { left: 19%; animation-duration: 22s; animation-delay: 1s;   width: 8px; height: 8px; background: var(--accent-orange); box-shadow: 0 0 8px rgba(220,92,59,0.6); }
+.particles span:nth-child(5)  { left: 24%; animation-duration: 17s; animation-delay: 4s;   }
+.particles span:nth-child(6)  { left: 29%; animation-duration: 25s; animation-delay: 7s;   width: 3px; height: 3px; }
+.particles span:nth-child(7)  { left: 34%; animation-duration: 14s; animation-delay: 2s;   }
+.particles span:nth-child(8)  { left: 39%; animation-duration: 19s; animation-delay: 5s;   width: 5px; height: 5px; }
+.particles span:nth-child(9)  { left: 44%; animation-duration: 21s; animation-delay: 0s;   }
+.particles span:nth-child(10) { left: 49%; animation-duration: 16s; animation-delay: 8s;   width: 7px; height: 7px; }
+.particles span:nth-child(11) { left: 54%; animation-duration: 23s; animation-delay: 3s;   }
+.particles span:nth-child(12) { left: 59%; animation-duration: 13s; animation-delay: 6s;   width: 4px; height: 4px; background: var(--accent-orange); box-shadow: 0 0 8px rgba(220,92,59,0.6); }
+.particles span:nth-child(13) { left: 64%; animation-duration: 18s; animation-delay: 1s;   }
+.particles span:nth-child(14) { left: 69%; animation-duration: 24s; animation-delay: 4s;   width: 6px; height: 6px; }
+.particles span:nth-child(15) { left: 74%; animation-duration: 15s; animation-delay: 7s;   }
+.particles span:nth-child(16) { left: 79%; animation-duration: 20s; animation-delay: 2s;   width: 3px; height: 3px; }
+.particles span:nth-child(17) { left: 84%; animation-duration: 17s; animation-delay: 5s;   }
+.particles span:nth-child(18) { left: 89%; animation-duration: 22s; animation-delay: 0s;   width: 8px; height: 8px; }
+.particles span:nth-child(19) { left: 94%; animation-duration: 14s; animation-delay: 8s;   }
+.particles span:nth-child(20) { left: 98%; animation-duration: 19s; animation-delay: 3s;   width: 5px; height: 5px; }
 
 /* Content overlay */
 .overlay {
     position: relative;
-    z-index: 1;
+    z-index: 2;
     width: 100%;
     height: 100%;
     display: flex;
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    padding: 2rem;
-    pointer-events: none;
     text-align: center;
+    padding: 2rem;
 }
 
 .domain-title {
     font-size: 3rem;
     font-weight: 800;
     color: var(--accent-cyan);
+    letter-spacing: 0.05em;
     text-shadow: 0 0 30px rgba(107, 219, 219, 0.5),
                  0 0 60px rgba(107, 219, 219, 0.2);
     margin-bottom: 1rem;
-    letter-spacing: 0.05em;
+    animation: glow-pulse 3s ease-in-out infinite;
+}
+@keyframes glow-pulse {
+    0%, 100% { text-shadow: 0 0 30px rgba(107,219,219,0.45), 0 0 60px rgba(107,219,219,0.18); }
+    50%      { text-shadow: 0 0 45px rgba(107,219,219,0.8),  0 0 90px rgba(107,219,219,0.35); }
 }
 
 .subtitle {
@@ -63,23 +126,30 @@ html, body {
     font-weight: 300;
     letter-spacing: 0.1em;
     text-transform: uppercase;
+    margin-bottom: 2.5rem;
 }
 
-/* CSS fallback animation (no WebGL) */
-.no-webgl .domain-title {
-    animation: glow-pulse 3s ease-in-out infinite;
+/* Loader dots */
+.loader { display: flex; gap: 0.6rem; }
+.loader span {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent-cyan);
+    opacity: 0.5;
+    animation: dot-bounce 1.4s ease-in-out infinite;
+}
+.loader span:nth-child(2) { animation-delay: 0.2s; }
+.loader span:nth-child(3) { animation-delay: 0.4s; }
+@keyframes dot-bounce {
+    0%, 80%, 100% { transform: translateY(0);     opacity: 0.35; }
+    40%           { transform: translateY(-10px);  opacity: 1; }
 }
 
-@keyframes glow-pulse {
-    0%, 100% {
-        text-shadow: 0 0 30px rgba(107, 219, 219, 0.5),
-                     0 0 60px rgba(107, 219, 219, 0.2);
-    }
-    50% {
-        text-shadow: 0 0 50px rgba(107, 219, 219, 0.8),
-                     0 0 100px rgba(107, 219, 219, 0.4),
-                     0 0 150px rgba(107, 219, 219, 0.1);
-    }
+/* Respect reduced-motion preferences */
+@media (prefers-reduced-motion: reduce) {
+    .bg-gradient, .particles span, .domain-title, .loader span { animation: none; }
+    .particles { display: none; }
 }
 
 /* Responsive */
@@ -87,7 +157,6 @@ html, body {
     .domain-title { font-size: 2rem; }
     .subtitle { font-size: 1rem; }
 }
-
 @media (max-width: 480px) {
     .domain-title { font-size: 1.5rem; }
     .subtitle { font-size: 0.85rem; }
