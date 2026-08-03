@@ -8,12 +8,13 @@
     <link rel="stylesheet" href="/css/style.css">
 </head>
 <body>
-    <!-- Page parking autonome (CSS + un seul JS local, aucune dépendance
-         externe) — compatible avec une CSP stricte default-src 'self'. -->
+    <!-- Fond CSS animé (fonctionne même si le JS ci-dessous ne charge pas). -->
     <div class="bg-gradient"></div>
 
-    <!-- Signature géométrique 3D de yrbane (canvas 2D, variations aléatoires) -->
-    <canvas id="geo-canvas" aria-hidden="true"></canvas>
+    <!-- Signature geo3d de yrbane, servie par GitHub via jsDelivr (toujours la
+         dernière version). data-random = layout aléatoire à chaque chargement.
+         La CSP scopée (.htaccess) autorise ce CDN pour la page parking. -->
+    <canvas id="geo" data-random aria-hidden="true"></canvas>
 
     <div class="particles" aria-hidden="true">
         <span></span><span></span><span></span><span></span><span></span>
@@ -30,6 +31,6 @@
         </div>
     </main>
 
-    <script src="/js/geo3d.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/gh/yrbane/geo3d@main/geo3d.js" defer></script>
 </body>
 </html>

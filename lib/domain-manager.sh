@@ -280,12 +280,14 @@ dm_deploy_parking() {
   local domain="$1"
   local docroot="${WEB_ROOT}/${domain}/www/public"
 
-  mkdir -p "${docroot}/css" "${docroot}/js"
+  mkdir -p "${docroot}/css"
   dm_render_template "parking-page.html" "$domain" "${docroot}/index.html" || return 1
   cp "${TEMPLATES_DIR}/parking-style.css" "${docroot}/css/style.css"
-  # geo3d de yrbane : signature 3D en fond (canvas 2D, servie en /js local pour
-  # respecter la CSP script-src 'self' — pas d'inline, pas de CDN).
-  cp "${TEMPLATES_DIR}/parking-geo3d.js" "${docroot}/js/geo3d.js"
+  # geo3d de yrbane : chargé depuis GitHub via jsDelivr (toujours la dernière
+  # version, cf github.com/yrbane/geo3d). Le .htaccess pose une CSP scopée qui
+  # autorise ce seul CDN pour la page parking (remplacé au déploiement du vrai
+  # site). Fond CSS de repli si le CDN est indisponible.
+  cp "${TEMPLATES_DIR}/parking.htaccess" "${docroot}/.htaccess"
 
   cat > "${docroot}/robots.txt" <<'EOF'
 User-agent: *
