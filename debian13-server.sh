@@ -90,6 +90,7 @@ source "${LIB_DIR}/hooks.sh"           # Système de plugins (hooks.d/*.sh)
 source "${LIB_DIR}/clone.sh"           # Clonage serveur (SSH + rsync)
 # shellcheck source=lib/tui.sh
 source "${LIB_DIR}/tui.sh"             # TUI whiptail/dialog + fallback texte
+source "${LIB_DIR}/optimize.sh"        # Optimisations perf réversibles (BBR, compression, JIT, MPM…)
 # shellcheck source=lib/fleet.sh
 source "${LIB_DIR}/fleet.sh"           # Orchestration multi-serveurs
 
@@ -106,6 +107,8 @@ show_help() {
   printf "${BOLD}${MAGENTA}OPTIONS GÉNÉRALES :${RESET}\n"
   printf "  ${GREEN}--noninteractive${RESET}          N'affiche pas les questions ; utilise les valeurs par défaut.\n"
   printf "  ${GREEN}--audit${RESET}                   Vérifications + rapport email, sans installation.\n"
+  printf "  ${GREEN}--optimize${RESET}                Applique les optimisations perf (BBR, compression, JIT, MariaDB, MPM event).\n"
+  printf "  ${GREEN}--optimize-rollback${RESET}       Annule les optimisations perf (retour aux valeurs par défaut).\n"
   printf "  ${GREEN}--check-dns${RESET}               Vérifie uniquement DNS/DKIM/mail (sans installation).\n"
   printf "  ${GREEN}--fix${RESET}                     Avec --check-dns : corrige automatiquement les DNS via API OVH.\n"
   printf "  ${GREEN}--dry-run${RESET}                 Simule les actions sans modifier le système.\n"
@@ -262,6 +265,8 @@ CLONE_PORT="22"
 DASHBOARD_DOMAIN=""
 ROLLBACK_ID=""
 SNAPSHOT_LIST_MODE=false
+OPTIMIZE_MODE=false
+OPTIMIZE_ROLLBACK_MODE=false
 DKIM_ROTATE_DOMAIN=""
 FLEET_ADD_NAME=""
 FLEET_ADD_IP=""
@@ -337,6 +342,8 @@ while [[ $# -gt 0 ]]; do
       [[ -z "$ROLLBACK_ID" ]] && die "--rollback nécessite un ID de snapshot."
       ;;
     --snapshot-list) SNAPSHOT_LIST_MODE=true ;;
+    --optimize) OPTIMIZE_MODE=true ;;
+    --optimize-rollback) OPTIMIZE_ROLLBACK_MODE=true ;;
     --dkim-rotate)
       shift; DKIM_ROTATE_DOMAIN="${1:-}"
       [[ -z "$DKIM_ROTATE_DOMAIN" ]] && die "--dkim-rotate nécessite un nom de domaine."
@@ -1070,6 +1077,18 @@ if $SNAPSHOT_LIST_MODE; then
   exit 0
 fi
 
+# --- --optimize / --optimize-rollback ---
+if $OPTIMIZE_MODE; then
+  load_config
+  optimize_apply
+  exit 0
+fi
+if $OPTIMIZE_ROLLBACK_MODE; then
+  load_config
+  optimize_rollback
+  exit 0
+fi
+
 # --- --rollback ---
 if [[ -n "$ROLLBACK_ID" ]]; then
   section "Rollback vers : ${ROLLBACK_ID}"
@@ -1253,6 +1272,11 @@ if ! $AUDIT_MODE; then
   source "${LIB_DIR}/install-devtools.sh"
   # shellcheck source=lib/install-security.sh
   source "${LIB_DIR}/install-security.sh"
+  # Optimisations de performance (réversibles via --optimize-rollback)
+  if ${INSTALL_OPTIMIZE:-true} && step_needed "optimize"; then
+    optimize_apply
+    mark_done "optimize"
+  fi
   run_hooks "post-install"
 fi
 
@@ -1263,6 +1287,7 @@ verify_services
 verify_ssh
 verify_web
 verify_websec
+optimize_status
 verify_system
 verify_devtools
 verify_dkim
