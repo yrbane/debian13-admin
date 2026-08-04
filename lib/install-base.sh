@@ -321,6 +321,17 @@ if id websec >/dev/null 2>&1 && [[ -d /etc/websec || -x /usr/local/bin/websec ]]
 
     install -d -o websec -g websec -m 0755 /etc/websec/geoip
 
+    # Rechargement à chaud (SIGHUP) : permet `systemctl reload websec` pour
+    # recharger la config géo sans redémarrer ni couper les connexions.
+    if systemctl list-unit-files websec.service >/dev/null 2>&1; then
+      install -d -m 0755 /etc/systemd/system/websec.service.d
+      cat > /etc/systemd/system/websec.service.d/reload.conf << 'RELOADEOF'
+[Service]
+ExecReload=/bin/kill -HUP $MAINPID
+RELOADEOF
+      systemctl daemon-reload
+    fi
+
     # Script de synchronisation (déploiement atomique, idempotent)
     geoip_sync_src="${SCRIPT_DIR}/templates/websec-geoip-sync.sh"
     [[ -f "$geoip_sync_src" ]] || geoip_sync_src="${SCRIPTS_DIR}/templates/websec-geoip-sync.sh"
@@ -335,8 +346,10 @@ if id websec >/dev/null 2>&1 && [[ -d /etc/websec || -x /usr/local/bin/websec ]]
     cat > /etc/cron.weekly/websec-geoip << 'CRONEOF'
 #!/bin/bash
 /usr/local/bin/websec-geoip-sync.sh >> /var/log/websec-geoip.log 2>&1
-# Recharger WebSec pour prendre en compte les nouvelles zones (base lue au boot)
-systemctl try-restart websec >> /var/log/websec-geoip.log 2>&1 || true
+# Recharger WebSec à chaud (SIGHUP) pour prendre les nouvelles zones sans couper
+# les connexions ; repli sur try-restart si le reload n'est pas disponible.
+systemctl reload websec >> /var/log/websec-geoip.log 2>&1 \
+  || systemctl try-restart websec >> /var/log/websec-geoip.log 2>&1 || true
 CRONEOF
     chmod +x /etc/cron.weekly/websec-geoip
 
