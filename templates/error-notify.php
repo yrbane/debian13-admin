@@ -37,6 +37,19 @@ function should_notify(int $code): bool {
  * Send error notification email for 5xx errors
  */
 function send_error_notification(int $code, array $context = []): void {
+    // Ne JAMAIS laisser un warning fuiter dans la sortie de la sous-requete
+    // ErrorDocument (sinon reponse FCGI corrompue -> AH01071 -> 502).
+    $prev_display = ini_set('display_errors', '0');
+    try {
+        _send_error_notification($code, $context);
+    } finally {
+        if ($prev_display !== false) {
+            ini_set('display_errors', $prev_display);
+        }
+    }
+}
+
+function _send_error_notification(int $code, array $context = []): void {
     if (!should_notify($code)) {
         return;
     }
@@ -52,6 +65,8 @@ function send_error_notification(int $code, array $context = []): void {
     $time     = date('Y-m-d H:i:s T');
 
     $subject = sprintf('[%s] Erreur %d sur %s', ERROR_HOSTNAME, $code, $uri);
+
+    $throttle = ERROR_THROTTLE_SECONDS;
 
     $body = <<<EOT
 Erreur HTTP {$code} detectee sur {$host}
@@ -69,12 +84,9 @@ Protocole : {$protocol}
 Hostname  : {$host}
 
 ---
-Notification automatique - throttle: 1 email / {$code} toutes les {$_SERVER['ERROR_THROTTLE']} secondes
+Notification automatique - throttle: 1 email / {$code} toutes les {$throttle} secondes
 Serveur: {$host}
 EOT;
-
-    // Replace the throttle placeholder with actual value
-    $body = str_replace('{$_SERVER[\'ERROR_THROTTLE\']}', (string)ERROR_THROTTLE_SECONDS, $body);
 
     $headers = [
         'From: noreply@' . ERROR_HOSTNAME,
