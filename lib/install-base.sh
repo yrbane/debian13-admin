@@ -305,6 +305,47 @@ CRONEOF
   fi
 fi
 
+# --------------------- 3bis) Données GeoIP pour WebSec (par domaine) -------------------
+# WebSec applique une politique géographique par domaine au niveau L7 (allow /
+# block / allow-only), là où le pare-feu ne peut que bloquer globalement au L3
+# (le SNI étant chiffré, le pare-feu ignore le domaine visé). Pour cela WebSec a
+# besoin des plages CIDR par pays, pour TOUS les pays — une règle "allow-only FR"
+# doit pouvoir identifier les visiteurs FR même si FR n'est pas bloqué au pare-feu.
+#
+# On peuple /etc/websec/geoip/<cc>.zone (ipdeny, v4+v6) via un script dédié, et
+# on rafraîchit chaque semaine (+ redémarrage WebSec pour recharger la base).
+# Étape conditionnée à la présence de WebSec (déployé séparément).
+if id websec >/dev/null 2>&1 && [[ -d /etc/websec || -x /usr/local/bin/websec ]]; then
+  if step_needed "websec_geoip"; then
+    section "Données GeoIP WebSec (politique par domaine, tous pays)"
+
+    install -d -o websec -g websec -m 0755 /etc/websec/geoip
+
+    # Script de synchronisation (déploiement atomique, idempotent)
+    geoip_sync_src="${SCRIPT_DIR}/templates/websec-geoip-sync.sh"
+    [[ -f "$geoip_sync_src" ]] || geoip_sync_src="${SCRIPTS_DIR}/templates/websec-geoip-sync.sh"
+    install -m 0755 "$geoip_sync_src" /usr/local/bin/websec-geoip-sync.sh
+    chmod +x /usr/local/bin/websec-geoip-sync.sh
+
+    log "Téléchargement des zones CIDR par pays (ipdeny, v4+v6)..."
+    /usr/local/bin/websec-geoip-sync.sh | tee -a "$LOG_FILE" || \
+      log "WARN: sync GeoIP WebSec échouée (réseau ?), à relancer manuellement"
+
+    # Cron hebdomadaire : rafraîchit les données puis recharge WebSec.
+    cat > /etc/cron.weekly/websec-geoip << 'CRONEOF'
+#!/bin/bash
+/usr/local/bin/websec-geoip-sync.sh >> /var/log/websec-geoip.log 2>&1
+# Recharger WebSec pour prendre en compte les nouvelles zones (base lue au boot)
+systemctl try-restart websec >> /var/log/websec-geoip.log 2>&1 || true
+CRONEOF
+    chmod +x /etc/cron.weekly/websec-geoip
+
+    mark_done "websec_geoip"
+  else
+    log "websec_geoip (deja fait)"
+  fi
+fi
+
 # ---------------------------------- 4) Fail2ban ---------------------------------------
 # Fail2ban surveille les logs en temps réel et bannit (via iptables) les IPs
 # qui déclenchent des patterns d'attaque. Architecture en 3 niveaux :
