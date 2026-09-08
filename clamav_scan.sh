@@ -36,8 +36,8 @@ clamscan -r -i --exclude-dir="^/sys" --exclude-dir="^/proc" --exclude-dir="^/dev
   --exclude='/var/log/.*\.xz$' / > "$LOG_FILE" 2>&1
 
 # Filtrer uniquement les fichiers infectés
-INFECTED=$(grep "FOUND$" "$LOG_FILE")
-NUMINFECTED=$(echo "$INFECTED" | grep -c "FOUND$" || echo 0)
+INFECTED=$(grep "FOUND$" "$LOG_FILE" || true)
+NUMINFECTED=$(grep -c "FOUND$" "$LOG_FILE") || NUMINFECTED=0
 
 # Préparer le tableau HTML
 prepare_table() {
@@ -68,10 +68,10 @@ generate_graph() {
     GRAPH+="<table border='1' cellpadding='3' cellspacing='0' style='border-collapse: collapse;'>"
     GRAPH+="<tr style='background-color:#f2f2f2;'><th>Date</th><th>Virus détectés</th></tr>"
 
-    for FILE in "$LOG_DIR/$MONTH"/*.log 2>/dev/null; do
+    for FILE in "$LOG_DIR/$MONTH"/*.log; do
         [[ -f "$FILE" ]] || continue
         DATE=$(basename "$FILE" | sed 's/scan-//;s/.log//')
-        COUNT=$(grep -c "FOUND$" "$FILE" 2>/dev/null || echo 0)
+        COUNT=$(grep -c "FOUND$" "$FILE" 2>/dev/null) || COUNT=0
         COLOR="#99ff99"
         [[ $COUNT -gt 0 ]] && COLOR="#ff9999"
         GRAPH+="<tr style='background-color:$COLOR;'><td>$DATE</td><td>$COUNT</td></tr>"
