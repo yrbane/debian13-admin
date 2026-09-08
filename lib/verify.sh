@@ -504,7 +504,7 @@ verify_websec() {
 
   # --- Config : certificats SNI + accès aux certs ---
   if [[ -f "$cfg" ]]; then
-    local sni; sni=$(grep -c '\[\[server.listeners.tls.sni_certificates\]\]' "$cfg" 2>/dev/null)
+    local sni; sni=$(grep -c '\[\[server.listeners.tls.sni_certificates\]\]' "$cfg" 2>/dev/null) || true
     emit_check info "Certificats SNI configurés : ${sni:-0}"
   fi
   if [[ -x /etc/letsencrypt/renewal-hooks/deploy/websec-cert-perms.sh ]]; then
@@ -515,8 +515,8 @@ verify_websec() {
 
   # --- Listes de contrôle d'accès ---
   local ldir="/etc/websec/lists" wl=0 bl=0
-  [[ -f "$ldir/whitelist.txt" ]] && wl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/whitelist.txt" 2>/dev/null)
-  [[ -f "$ldir/blacklist.txt" ]] && bl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/blacklist.txt" 2>/dev/null)
+  if [[ -f "$ldir/whitelist.txt" ]]; then wl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/whitelist.txt" 2>/dev/null) || true; fi
+  if [[ -f "$ldir/blacklist.txt" ]]; then bl=$(grep -cvE '^[[:space:]]*(#|$)' "$ldir/blacklist.txt" 2>/dev/null) || true; fi
   emit_check info "Listes : ${wl} whitelist / ${bl} blacklist (${ldir})"
 
   # --- Rapport de métriques live (Prometheus, endpoint TLS) ---
